@@ -211,31 +211,41 @@ ai:
     message-chunk-size: 1
 
   chat:
-    default-model: qwen-plus
-    deep-thinking-model: qwen3-max
     candidates:
       - id: qwen-plus
         provider: bailian
         model: qwen-plus-latest
-        priority: 1
+      - id: qwen-flash
+        provider: bailian
+        model: qwen-flash
       - id: qwen3-local
         provider: ollama
         model: qwen3:8b-fp16
-        priority: 2
       - id: qwen3-max
         provider: bailian
         model: qwen3-max
         supports-thinking: true
-        priority: 3
       - id: glm-4.7
         provider: siliconflow
         model: Pro/zai-org/GLM-4.7
         supports-thinking: true
-        priority: 4
       - id: gpt-5.4
         provider: aihubmix
         model: gpt-5.4
-        priority: 5
+
+    default-tier: standard
+    deep-thinking-tier: deep
+
+    tiers:
+      fast:
+        candidates: [ qwen-flash, qwen-plus, qwen3-local ]
+        timeout-ms: 5000
+      standard:
+        candidates: [ qwen-plus, qwen3-local, gpt-5.4 ]
+        timeout-ms: 30000
+      deep:
+        candidates: [ qwen3-max, glm-4.7 ]
+        timeout-ms: 120000
 
   embedding:
     default-model: qwen-emb-8b

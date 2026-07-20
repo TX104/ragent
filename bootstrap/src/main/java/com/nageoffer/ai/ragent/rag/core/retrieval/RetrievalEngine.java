@@ -25,6 +25,7 @@ import com.nageoffer.ai.ragent.rag.config.SearchChannelProperties;
 import com.nageoffer.ai.ragent.rag.core.intent.IntentNode;
 import com.nageoffer.ai.ragent.rag.core.intent.NodeScore;
 import com.nageoffer.ai.ragent.rag.core.intent.NodeScoreFilters;
+import com.nageoffer.ai.ragent.rag.core.mcp.McpExtractionResult;
 import com.nageoffer.ai.ragent.rag.core.mcp.McpParameterExtractor;
 import com.nageoffer.ai.ragent.rag.core.mcp.McpToolExecutor;
 import com.nageoffer.ai.ragent.rag.core.mcp.McpToolRegistry;
@@ -264,9 +265,42 @@ public class RetrievalEngine {
         Tool tool = executor.getToolDefinition();
 
         String customParamPrompt = intentNode.getParamPromptTemplate();
-        Map<String, Object> params = mcpParameterExtractor.extractParameters(question, tool, customParamPrompt);
+        McpExtractionResult extraction = mcpParameterExtractor.extractParameters(question, tool, customParamPrompt);
 
-        return executor.execute(params != null ? params : new HashMap<>());
+        // 按提参结局分流：仅 SUCCESS 才真正调用远端工具，缺必填参 / 提取失败均不调用、改注入提示进上下文
+        return switch (extraction.status()) {
+            case SUCCESS -> executor.execute(extraction.params() != null ? extraction.params() : new HashMap<>());
+            case NEED_CLARIFICATION -> clarificationResult(toolId, extraction.missingRequired());
+            case FAILED -> extractionFailedResult(toolId);
+        };
+    }
+
+    /**
+     * 缺必填参数（用户未提供）：不调用工具，注入结构化提示让 LLM 在回答中主动向用户追问
+     * <p>
+     * isError=false 使其作为正文进入上下文（而非「工具调用失败」段），便于 LLM 直接据此追问
+     */
+    private CallToolResult clarificationResult(String toolId, List<String> missingRequired) {
+        String missing = CollUtil.isNotEmpty(missingRequired) ? String.join("、", missingRequired) : "必要信息";
+        log.info("MCP 缺少必填参数，跳过工具调用并注入澄清提示, toolId: {}, missing: {}", toolId, missingRequired);
+        String note = String.format(
+                "调用工具【%s】需要参数：%s，但用户问题中未提供。请在回答中主动向用户询问这些信息，不要编造。",
+                toolId, missing);
+        return CallToolResult.builder()
+                .content(List.of(new TextContent(note)))
+                .isError(false)
+                .build();
+    }
+
+    /**
+     * 提取失败（协议畸形 / 值非法）：不调用工具，注入失败提示（isError=true 进「工具调用失败」段）
+     */
+    private CallToolResult extractionFailedResult(String toolId) {
+        log.warn("MCP 参数提取失败，跳过工具调用, toolId: {}", toolId);
+        return CallToolResult.builder()
+                .content(List.of(new TextContent("未能为工具【" + toolId + "】提取到有效参数，已跳过调用。")))
+                .isError(true)
+                .build();
     }
 
     private record ToolOutput(String toolId, CallToolResult result) {

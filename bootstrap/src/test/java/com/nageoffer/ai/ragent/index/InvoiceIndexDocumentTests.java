@@ -172,7 +172,10 @@ public class InvoiceIndexDocumentTests {
                 %s
                 """
                 .formatted(fileContent);
-        return llmService.chat(prompt);
+        ChatRequest req = ChatRequest.builder()
+                .messages(List.of(ChatMessage.user(prompt)))
+                .build();
+        return llmService.chat(req);
     }
 
     @Test

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
+  Bot,
   ChevronDown,
   ChevronRight,
   ChevronsLeft,
@@ -23,7 +24,8 @@ import {
   Upload,
   Users,
   FolderKanban,
-  Workflow
+  Workflow,
+  type LucideIcon
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { Button } from "@/components/ui/button";
@@ -36,6 +38,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { useGitHubStars } from "@/hooks/useGitHubStars";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { changePassword } from "@/services/userService";
@@ -50,7 +53,7 @@ import { Avatar } from "@/components/common/Avatar";
 type MenuChild = {
   path: string;
   label: string;
-  icon: any;
+  icon: LucideIcon;
   search?: string;
 };
 
@@ -58,7 +61,9 @@ type MenuItem = {
   id?: string;
   path: string;
   label: string;
-  icon: any;
+  icon: LucideIcon;
+  /** 字形本身偏小的图标在这里补一个视觉尺寸修正，跟同栏其余图标找齐 */
+  iconClass?: string;
   search?: string;
   children?: MenuChild[];
 };
@@ -76,6 +81,12 @@ const menuGroups: MenuGroup[] = [
         path: "/admin/dashboard",
         label: "Dashboard",
         icon: LayoutDashboard
+      },
+      {
+        path: "/admin/agents",
+        label: "智能体管理",
+        icon: Bot,
+        iconClass: "admin-sidebar__item-icon--optical-lg"
       },
       {
         path: "/admin/knowledge",
@@ -166,6 +177,7 @@ const menuGroups: MenuGroup[] = [
 
 const breadcrumbMap: Record<string, string> = {
   dashboard: "Dashboard",
+  agents: "智能体管理",
   knowledge: "知识库管理",
   "knowledge-graph": "知识图谱",
   "intent-tree": "意图树配置",
@@ -191,7 +203,7 @@ export function AdminLayout() {
     newPassword: "",
     confirmPassword: ""
   });
-  const [starCount, setStarCount] = useState<number | null>(null);
+  const starCount = useGitHubStars();
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ ingestion: true, intent: true });
   const [kbQuery, setKbQuery] = useState("");
   const [kbOptions, setKbOptions] = useState<KnowledgeBase[]>([]);
@@ -208,25 +220,6 @@ export function AdminLayout() {
     await logout();
     navigate("/login");
   };
-
-  useEffect(() => {
-    let active = true;
-    fetch("https://api.github.com/repos/nageoffer/ragent")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (!active) return;
-        const count = typeof data?.stargazers_count === "number" ? data.stargazers_count : null;
-        setStarCount(count);
-      })
-      .catch(() => {
-        if (active) {
-          setStarCount(null);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
 
   useEffect(() => {
     if (!searchFocused) return;
@@ -324,6 +317,10 @@ export function AdminLayout() {
 
     if (section === "traces" && segments.length > 2) {
       items.push({ label: "链路详情" });
+    }
+
+    if (section === "agents" && segments.length > 2) {
+      items.push({ label: "提示词配置" });
     }
 
     return items;
@@ -453,7 +450,9 @@ export function AdminLayout() {
       <aside className={cn("admin-sidebar", collapsed && "admin-sidebar--collapsed")}>
         <div className="admin-sidebar__brand">
           <div className={cn("flex items-center gap-3", collapsed && "justify-center")}>
-            <div className="admin-sidebar__logo">R</div>
+            <div className="admin-sidebar__logo">
+              <Bot className="h-[22px] w-[22px]" />
+            </div>
             {!collapsed && (
               <div className="min-w-0">
                 <h1 className="admin-sidebar__title">Ragent AI 管理后台</h1>
@@ -491,7 +490,7 @@ export function AdminLayout() {
                             isActive && "is-active"
                           )}
                         />
-                        <Icon className="admin-sidebar__item-icon" />
+                        <Icon className={cn("admin-sidebar__item-icon", item.iconClass)} />
                         {collapsed ? <span className="sr-only">{item.label}</span> : <span>{item.label}</span>}
                       </Link>
                     );
@@ -545,7 +544,7 @@ export function AdminLayout() {
                                 isGroupActive && "is-group-active"
                               )}
                             />
-                        <item.icon className="admin-sidebar__item-icon" />
+                        <item.icon className={cn("admin-sidebar__item-icon", item.iconClass)} />
                         <span className="flex-1 text-left">{item.label}</span>
                         {isOpen ? (
                           <ChevronDown className="h-4 w-4 text-white/60" />

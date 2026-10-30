@@ -18,10 +18,8 @@ import java.util.Properties;
  */
 record MemoryTurnScript(String anchor, List<Turn> turns) {
 
-    /**
-     * 已经实现、可以按硬断言判定的记忆层；P1 / P2 落地后把对应值加进来，同一份剧本自动转红转绿
-     */
-    static final List<String> IMPLEMENTED_TIERS = List.of("short-term");
+    // 已实现的记忆层，三层齐了；未列出的层判失败只记 PENDING，不判死
+    static final List<String> IMPLEMENTED_TIERS = List.of("short-term", "mid-term", "long-term");
 
     static final String SESSION_MAIN = "main";
     static final String SESSION_FRESH = "fresh";
@@ -42,7 +40,8 @@ record MemoryTurnScript(String anchor, List<Turn> turns) {
                     values.getProperty(prefix + "purpose", "").trim(),
                     required(values, prefix + "text", file),
                     splitAlternatives(values.getProperty(prefix + "expect-any", "")),
-                    values.getProperty(prefix + "expect-tool", "").trim()));
+                    values.getProperty(prefix + "expect-tool", "").trim(),
+                    values.getProperty(prefix + "forbid-tool", "").trim()));
         }
         if (turns.isEmpty()) {
             throw new IllegalArgumentException("剧本里没有任何轮次: " + file);
@@ -79,18 +78,17 @@ record MemoryTurnScript(String anchor, List<Turn> turns) {
     }
 
     /**
-     * 单轮剧本
-     * expectAny 命中任意一个即算记住，模型换个说法不该判死；为空表示本轮不判回答内容
+     * 单轮剧本；expectAny 命中任一即算记住，为空不判内容；forbidTool 禁止重查以验证记忆
      */
     record Turn(String ref, String session, String tier, String purpose, String text,
-                List<String> expectAny, String expectTool) {
+                List<String> expectAny, String expectTool, String forbidTool) {
 
         boolean fresh() {
             return SESSION_FRESH.equals(session);
         }
 
         /**
-         * 未实现的记忆层不判死：答不出是当前的正确行为，答得出反而要人复核
+         * 未实现的层不判死
          */
         boolean enforced() {
             return IMPLEMENTED_TIERS.contains(tier);

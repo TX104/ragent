@@ -50,6 +50,11 @@ public class IntentNodeTreeVO {
     private String mcpToolId;
 
     /**
+     * 执行前是否需要用户确认：0=否，1=是（仅对 kind=2 有意义）
+     */
+    private Integer requireConfirm;
+
+    /**
      * 短规则片段（可选）
      */
     private String promptSnippet;
@@ -58,11 +63,6 @@ public class IntentNodeTreeVO {
      * 场景用的完整 Prompt 模板（可选）
      */
     private String promptTemplate;
-
-    /**
-     * 参数提取提示词模板（MCP模式专属）
-     */
-    private String paramPromptTemplate;
 
     private List<IntentNodeTreeVO> children;
 }

@@ -22,9 +22,7 @@ final class AgentStateProbe {
      */
     static final String EVICTED_PREFIX = "[历史工具结果已省略，原长 ";
 
-    /**
-     * P1 会把摘要物化成一条 name 固定的消息挂在上下文头部，未实现前恒为 0
-     */
+    // 与 AgentContextCompactor.SUMMARY_NAME 同源，改了那边必须同步
     private static final String COMPACTION_SUMMARY_NAME = "__compaction_summary__";
 
     private final JdbcClient jdbc;
@@ -39,7 +37,10 @@ final class AgentStateProbe {
         List<List<String>> header = jdbc.queryRows(ctes + " SELECT"
                 + " (SELECT length(payload::text) FROM s),"
                 + " (SELECT COALESCE(jsonb_array_length(payload->'context'), 0) FROM s),"
-                + " (SELECT COALESCE(payload->>'summary', '') FROM s),"
+                + " (SELECT COALESCE(string_agg(c->>'text', chr(10) ORDER BY ord), '') FROM m,"
+                + " LATERAL jsonb_array_elements(COALESCE(msg->'content', '[]'::jsonb)) c"
+                + " WHERE msg->>'name' = " + JdbcClient.literal(COMPACTION_SUMMARY_NAME)
+                + " AND c->>'type' = 'text'),"
                 + " (SELECT count(*) FROM m WHERE msg->>'name' = " + JdbcClient.literal(COMPACTION_SUMMARY_NAME) + "),"
                 + " (SELECT count(*) FROM b WHERE blk->>'type' = 'text'),"
                 + " (SELECT count(*) FROM b WHERE blk->>'type' = 'thinking'),"
@@ -90,8 +91,7 @@ final class AgentStateProbe {
     }
 
     /**
-     * WITH ORDINALITY 把上下文的先后固化成列，报告要按真实顺序看 usage 才有意义
-     * 不按 state_key 过滤：键名是框架私有约定，改名不该让回归台整体失灵
+     * 不按 state_key 过滤：键名是框架私有约定
      */
     private static String commonTableExpressions(String userId, String sessionId) {
         return "WITH s AS (SELECT payload, update_time FROM t_agent_state"
@@ -106,8 +106,7 @@ final class AgentStateProbe {
     }
 
     /**
-     * 与 AgentContextTrimmer.charsOf 对齐的口径，只有 tool_use 的入参无法完全对齐：
-     * 服务端算的是 Map.toString 长度，这里算 JSON 文本长度，因此本列是近似值
+     * 与 AgentContextChars 对齐的口径，tool_use 入参因 Map.toString vs JSON 有微小偏差
      */
     private static String contextCharsExpression() {
         return "CASE blk->>'type'"
@@ -125,7 +124,7 @@ final class AgentStateProbe {
     }
 
     /**
-     * 一次会话状态的只读快照，全部字段来自同一行 payload
+     * 会话状态只读快照
      */
     record Snapshot(boolean present, int payloadBytes, int messageCount, String summary, int summaryMessages,
                     int textBlocks, int thinkingBlocks, int toolUseBlocks, int toolResultBlocks,
@@ -138,7 +137,7 @@ final class AgentStateProbe {
         }
 
         /**
-         * 孤儿块是破坏性写留下的唯一可自动检出的痕迹，P0 只做等长替换，出现即说明有人动了消息条数
+         * 孤儿块说明有人动了消息条数
          */
         boolean structurallySound() {
             return orphanToolUses == 0 && orphanToolResults == 0;

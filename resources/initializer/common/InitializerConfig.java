@@ -37,14 +37,15 @@ final class InitializerConfig {
             raw.load(reader);
         }
         Properties merged = new Properties();
-        String applicationConfig = raw.getProperty("application.config");
-        if (applicationConfig != null && !applicationConfig.isBlank()) {
-            Path applicationFile = Path.of(expandPlaceholders(applicationConfig.trim()));
-            if (!applicationFile.isAbsolute()) {
-                applicationFile = file.toAbsolutePath().normalize().getParent().resolve(applicationFile).normalize();
-            }
+        Path applicationFile = resolveSibling(file, raw.getProperty("application.config"));
+        if (applicationFile != null) {
             merged.putAll(ApplicationYamlConfig.load(applicationFile));
             merged.setProperty("application.config-resolved", applicationFile.toString());
+        }
+        // 业务库只有比特严选那套数据集要用，它的身份以 mcp-server 的 yml 为准，没配就整段不存在
+        Path mcpFile = resolveSibling(file, raw.getProperty("application.mcp-config"));
+        if (mcpFile != null) {
+            merged.putAll(ApplicationYamlConfig.loadBit(mcpFile));
         }
         merged.putAll(raw);
         Properties expanded = new Properties();
@@ -58,6 +59,20 @@ final class InitializerConfig {
         return load(file).values;
     }
 
+    /**
+     * 把配置里写的相对路径按配置文件自身所在目录解析，没配返回 null
+     */
+    private static Path resolveSibling(Path configFile, String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        Path path = Path.of(expandPlaceholders(value.trim()));
+        if (path.isAbsolute()) {
+            return path;
+        }
+        return configFile.toAbsolutePath().normalize().getParent().resolve(path).normalize();
+    }
+
     String require(String key) {
         String value = get(key, null);
         if (value == null || value.isBlank()) {
@@ -69,6 +84,11 @@ final class InitializerConfig {
     String get(String key, String defaultValue) {
         String value = values.getProperty(key);
         return value == null ? defaultValue : value.trim();
+    }
+
+    int requireInt(String key) {
+        require(key);
+        return getInt(key, 0);
     }
 
     int getInt(String key, int defaultValue) {

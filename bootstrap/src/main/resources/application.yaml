@@ -41,19 +41,32 @@ ragent:
 
 # Agent 执行架构（ragent.engine.type=agent 时生效）；单模型无 fallback，供应商可用性由 provider 侧保障
 agent:
+  mcp:
+    servers:
+      - name: default
+        url: http://localhost:9099
   chat:
-    provider: siliconflow   # 引用 ai.providers 下的供应商，取其 url / api-key / endpoints.chat
-    model: deepseek-ai/DeepSeek-V4-Pro    # 直接传给 OpenAI 兼容端点的模型名
-  max-iters: 10         # ReAct 循环上限，超出后熔断收尾
-  max-retries: 2        # 单次模型调用失败重试次数
+    provider: deepseek   # 引用 ai.providers 下的供应商，取其 url / api-key / endpoints.chat
+    model: deepseek-flash    # 直接传给 OpenAI 兼容端点的模型名
+  max-iters: 10
+  max-retries: 1
   sse-timeout-ms: 900000
+  max-concurrent-runs-per-user: 5
   memory:
-    enabled: true
-    tool-result:
-      trigger-chars: 20000        # 上下文没这么大就一个字节不动，这道门管「有没有问题」；待 regression 实测回填
-      keep-recent-cycles: 2       # 从上一轮往前保几个已完成循环；本轮的与未闭合的额外全保、不占配额
-      clear-at-least-ratio: 0.2   # 回收量不到当前上下文这个比例就整次不动，这道门管「值不值得改前缀」
-      evictable-tools: [ search_knowledge ] # 白名单；MCP 工具副作用无法静态判定，不可改黑名单
+    context-window-chars: 100000
+    summary-enabled: true
+    long-term-enabled: true
+    evictable-tools: [ search_knowledge ]
+  trace:
+    enabled: false  # 开启前先起 resources/docker/langfuse 那套服务
+    capture-content: true  # 记录提示词与工具出入参；纯骨架改 false
+    endpoint: http://localhost:3000/api/public/otel/v1/traces
+    public-key: pk-lf-ragent-local     # 与 compose 里的 LANGFUSE_INIT_PROJECT_PUBLIC_KEY 一致
+    secret-key: sk-lf-ragent-local     # 与 compose 里的 LANGFUSE_INIT_PROJECT_SECRET_KEY 一致
+    max-field-chars: 32768
+    max-attribute-chars: 131072 # 超限退成带 preview 的合法 JSON
+    service-version:  # 留空取 build-info 版本；要盖 pom 版本才填
+    environment:      # 如 local / staging / prod
 
 rag:
   storage:
@@ -136,11 +149,6 @@ rag:
       batch-size: 20
       min-interval-seconds: 60
 
-  mcp:
-    servers:
-      - name: default
-        url: http://localhost:9099
-
   search:
     # 检索漏斗三段预算，各自独立、单调收窄，启动时校验 recall-budget ≥ default-top-k 且 rerank-candidate-limit ≥ default-top-k
     default-top-k: 10           # ③ 最终进 LLM 的条数（产品语义的 topK）
@@ -213,12 +221,11 @@ ai:
       endpoints:
         chat: /v1/chat/completions
         embedding: /v1/embeddings
-    siliconflow:
-      url: https://api.siliconflow.cn
-      api-key: ${SILICONFLOW_API_KEY:}
+    deepseek:
+      url: https://api.deepseek.com
+      api-key: ${DEEPSEEK_API_KEY:}
       endpoints:
         chat: /v1/chat/completions
-        embedding: /v1/embeddings
 
   selection:
     failure-threshold: 2
@@ -238,16 +245,15 @@ ai:
       - id: qwen3-local
         provider: ollama
         model: qwen3:8b-fp16
-      - id: qwen3-max
+      - id: qwen3.8
         provider: bailian
-        model: qwen3-max
-        supports-thinking: true
-      - id: gpt-5.4
+        model: qwen3.8-27b
+      - id: gpt-6.1-sol
         provider: aihubmix
-        model: gpt-5.4
-      - id: deepseekv4pro
-        provider: siliconflow
-        model: deepseek-ai/DeepSeek-V4-Pro
+        model: gpt-6.1-sol
+      - id: deepseek-flash
+        provider: deepseek
+        model: deepseek-flash
         supports-thinking: true
 
     default-tier: standard
@@ -258,10 +264,10 @@ ai:
         candidates: [ qwen-flash, qwen-plus, qwen3-local ]
         timeout-ms: 5000
       standard:
-        candidates: [ qwen3-max, qwen-plus, qwen3-local, gpt-5.4 ]
+        candidates: [ qwen3.8, qwen-plus, deepseek-flash, qwen3-local ]
         timeout-ms: 120000
       deep:
-        candidates: [ qwen3-max, deepseekv4pro ]
+        candidates: [ deepseek-flash ]
         timeout-ms: 180000
 
   embedding:

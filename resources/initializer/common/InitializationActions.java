@@ -7,6 +7,7 @@
 package com.nageoffer.ai.ragent.initializer;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -22,11 +23,15 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.stream.Stream;
 
 /** Reusable operations invoked by the small Main entry points. */
 final class InitializationActions {
 
     private static final String INITIALIZER_LOCK_KEY = "ragent:initializer:lock";
+
+    private static final String BIZ_SCHEMA_MISSING =
+            "业务库表结构不存在，请先启动一次 mcp-server（它负责建表），或检查 ragent.bit.datasource.url";
 
     private InitializationActions() {
     }
@@ -62,6 +67,10 @@ final class InitializationActions {
         System.out.println("[preflight] Redis PONG");
         require(context.jdbc().queryLong("SELECT 1") == 1, "PostgreSQL 连通性检查失败");
         System.out.println("[preflight] " + context.jdbc().description());
+        if (context.hasBizDatabase()) {
+            requireBizSchema(context);
+            System.out.println("[preflight] " + context.bizJdbc().description());
+        }
         verifyBackendSettings(context, settings);
         assertIdle(context);
 
@@ -79,8 +88,9 @@ final class InitializationActions {
             for (Map<String, Object> base : bases) {
                 documents += listDocuments(context, SimpleJson.string(base, "id")).size();
             }
-            System.out.printf("[cleanup][dry-run] 将删除 knowledgeBases=%d, documents=%d，并执行 %s%n",
-                    bases.size(), documents, context.agentTypeDir().resolve("cleanup.sql"));
+            System.out.printf("[cleanup][dry-run] 将删除 knowledgeBases=%d, documents=%d，并执行 %s%s%n",
+                    bases.size(), documents, context.agentTypeDir().resolve("cleanup.sql"),
+                    context.hasBizDatabase() ? " 与 " + context.agentTypeDir().resolve("biz-cleanup.sql") : "");
             return;
         }
 
@@ -97,11 +107,85 @@ final class InitializationActions {
             System.out.println("[cleanup] 执行固定白名单 SQL: " + cleanupSql);
             context.jdbc().executeScript(cleanupSql);
 
+            if (context.hasBizDatabase()) {
+                Path bizCleanupSql = context.agentTypeDir().resolve("biz-cleanup.sql");
+                System.out.println("[cleanup] 清空业务库数据表: " + bizCleanupSql);
+                context.bizJdbc().executeScript(bizCleanupSql);
+            }
+
             System.out.println("[cleanup] 精确清理 Ragent 缓存和已结束任务 Key");
             clearRedis(context);
             System.out.println("[cleanup] 完成");
         } finally {
             context.redis().releaseLock(INITIALIZER_LOCK_KEY, context.runId());
+        }
+    }
+
+    /**
+     * 灌业务库种子数据，先清空再按文件名顺序重灌，跑几次结果都一样
+     * <p>
+     * 表结构归 mcp-server 启动期建，这里只碰数据：建表放在启动路径上是非破坏的，清空重灌不是，
+     * 混在一起就成了「重启一次清空一次订单」
+     */
+    static void initializeBizData(InitializerContext context) throws Exception {
+        Path dataDir = context.agentTypeDir().resolve("biz-data");
+        if (!Files.isDirectory(dataDir)) {
+            System.out.println("[biz-data] 数据集没有业务库种子数据，跳过");
+            return;
+        }
+        Path cleanupSql = context.agentTypeDir().resolve("biz-cleanup.sql");
+        List<Path> scripts = sortedSqlFiles(dataDir);
+        require(!scripts.isEmpty(), "biz-data 目录里没有 .sql 文件: " + dataDir);
+        if (context.dryRun()) {
+            System.out.printf("[biz-data][dry-run] 将执行 %s，再按序灌入 %d 个种子脚本%n",
+                    cleanupSql, scripts.size());
+            return;
+        }
+        requireBizSchema(context);
+
+        String username = context.config().require("auth.username");
+        String ownerId = resolveBizOwnerId(context, username);
+        System.out.printf("[biz-data] 订单、购物车和券挂在 %s (id=%s) 名下，换账号登录看到的是空列表%n",
+                username, ownerId);
+        context.bizJdbc().executeScript(cleanupSql);
+        System.out.println("[biz-data] 已清空业务数据表: " + cleanupSql.getFileName());
+        Map<String, String> variables = Map.of("USER_ID", JdbcClient.literal(ownerId));
+        for (Path script : scripts) {
+            context.bizJdbc().executeScript(script, variables);
+            System.out.println("[biz-data] 已灌入: " + script.getFileName());
+        }
+    }
+
+    /**
+     * 种子数据要挂在真人身上：工具一律按登录态圈数据，挂错人所有演示都只会回「未找到」
+     */
+    private static String resolveBizOwnerId(InitializerContext context, String username) throws Exception {
+        List<List<String>> rows = context.jdbc().queryRows("SELECT id FROM t_user WHERE username = "
+                + JdbcClient.literal(username) + " AND deleted = 0");
+        require(!rows.isEmpty(), "平台库里没有用户 " + username + "，业务库种子数据没法挂到人身上");
+        return rows.get(0).get(0);
+    }
+
+    /**
+     * 表不在就换成能照着做的下一步，别把 PostgreSQL 原生的 relation does not exist 直接甩出来
+     */
+    private static void requireBizSchema(InitializerContext context) {
+        long marker;
+        try {
+            marker = context.bizJdbc().queryLong("SELECT count(*) FROM information_schema.tables "
+                    + "WHERE table_schema = current_schema() AND table_name = 't_schema_version'");
+        } catch (Exception ex) {
+            throw new IllegalStateException(BIZ_SCHEMA_MISSING + "。连接业务库失败: " + ex.getMessage(), ex);
+        }
+        require(marker == 1, BIZ_SCHEMA_MISSING);
+    }
+
+    private static List<Path> sortedSqlFiles(Path directory) throws IOException {
+        try (Stream<Path> paths = Files.list(directory)) {
+            return paths.filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().endsWith(".sql"))
+                    .sorted(Comparator.comparing(path -> path.getFileName().toString()))
+                    .toList();
         }
     }
 
@@ -218,13 +302,13 @@ final class InitializationActions {
                 payload.put("examples", intent.examples());
             }
             putIfNotNull(payload, "mcpToolId", intent.mcpToolId());
+            payload.put("requireConfirm", intent.requireConfirm() ? 1 : 0);
             putIfNotNull(payload, "topK", intent.topK());
             payload.put("kind", intent.kind());
             payload.put("sortOrder", intent.sortOrder());
             payload.put("enabled", intent.enabled() ? 1 : 0);
             putIfNotNull(payload, "promptSnippet", intent.promptSnippet());
             putIfNotNull(payload, "promptTemplate", intent.promptTemplate());
-            putIfNotNull(payload, "paramPromptTemplate", intent.paramPromptTemplate());
             if (intent.knowledgeBaseRef() != null) {
                 InitializerContext.KnowledgeBaseRuntime runtime =
                         context.knowledgeBases().get(intent.knowledgeBaseRef());
@@ -260,6 +344,125 @@ final class InitializationActions {
             Object id = context.http().postJson("/sample-questions", payload);
             System.out.println("[sample-question] 已创建: " + question.ref() + " (" + id + ")");
         }
+    }
+
+    /**
+     * 必须排在意图树之后：技能的 tool-ids 只能引用意图树里已启用的 MCP 节点，先播技能会被服务端直接拒掉
+     */
+    static void initializeSkills(InitializerContext context) throws Exception {
+        List<InitializerDataset.SkillDefinition> skills = context.dataset().skills();
+        if (skills.isEmpty()) {
+            System.out.println("[agent-skill] 数据集没有配置技能手册，跳过");
+            return;
+        }
+        if (context.dryRun()) {
+            for (InitializerDataset.SkillDefinition skill : skills) {
+                System.out.printf("[agent-skill][dry-run] create skillCode=%s tools=%s%n",
+                        skill.skillCode(), skill.toolIds());
+            }
+            return;
+        }
+        List<Map<String, Object>> existing = fetchAllPages(context, "/agent-skills");
+        for (Map<String, Object> item : existing) {
+            context.http().delete("/agent-skills/" + RagentHttpClient.encodePath(SimpleJson.string(item, "id")));
+        }
+        if (!existing.isEmpty()) {
+            System.out.println("[agent-skill] 已清理旧技能: " + existing.size());
+        }
+        for (InitializerDataset.SkillDefinition skill : skills) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("skillCode", skill.skillCode());
+            payload.put("name", skill.name());
+            putIfNotNull(payload, "description", skill.description());
+            payload.put("content", skill.content());
+            payload.put("toolIds", skill.toolIds());
+            payload.put("sortOrder", skill.sortOrder());
+            payload.put("enabled", skill.enabled());
+            Object id = context.http().postJson("/agent-skills", payload);
+            System.out.println("[agent-skill] 已创建: " + skill.skillCode() + " (" + id + ")");
+        }
+    }
+
+    /**
+     * 新建一份人设并激活，内置智能体一个字不动：切回去只要把 active 切回内置，空槽位自动回落
+     * <p>
+     * 必须排在 cleanup 之后——cleanup 按 builtin = 0 删行，先建的 profile 会被它删掉
+     */
+    static void initializeAgentProfile(InitializerContext context) throws Exception {
+        InitializerDataset.AgentProfileDefinition profile = context.dataset().agentProfile();
+        if (profile == null) {
+            System.out.println("[agent-profile] 数据集没有配置人设，沿用内置智能体");
+            return;
+        }
+        if (context.dryRun()) {
+            System.out.printf("[agent-profile][dry-run] create name=%s slots=%s%n",
+                    profile.name(), profile.prompts().keySet());
+            return;
+        }
+
+        String agentId = findAgentIdByName(context, profile.name());
+        if (agentId == null) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("name", profile.name());
+            putIfNotNull(payload, "description", profile.description());
+            putIfNotNull(payload, "avatar", profile.avatar());
+            agentId = String.valueOf(context.http().postJson("/agents", payload));
+            System.out.println("[agent-profile] 已创建: " + profile.name() + " (" + agentId + ")");
+        } else {
+            System.out.println("[agent-profile] 复用同名智能体: " + profile.name() + " (" + agentId + ")");
+        }
+
+        String encodedId = RagentHttpClient.encodePath(agentId);
+        for (Map.Entry<String, String> slot : profile.prompts().entrySet()) {
+            context.http().putJson("/agents/" + encodedId + "/prompts/" + RagentHttpClient.encodePath(slot.getKey()),
+                    Map.of("content", slot.getValue()));
+            System.out.println("[agent-profile] 已写入槽位: " + slot.getKey());
+        }
+        context.http().postEmpty("/agents/" + encodedId + "/activate");
+
+        // 建了 profile 却一个槽位都没写成功时接口照样是 200，回读一次才看得出来
+        verifyAgentPrompts(context, encodedId, profile);
+        System.out.println("[agent-profile] 已激活并回读校验通过: " + profile.name());
+    }
+
+    private static String findAgentIdByName(InitializerContext context, String name) throws Exception {
+        Map<String, Object> listing = SimpleJson.object(context.http().get("/agents"));
+        for (Object item : SimpleJson.array(listing.get("agents"))) {
+            Map<String, Object> agent = SimpleJson.object(item);
+            if (name.equals(SimpleJson.string(agent, "name"))) {
+                return SimpleJson.string(agent, "id");
+            }
+        }
+        return null;
+    }
+
+    private static void verifyAgentPrompts(InitializerContext context, String encodedId,
+                                           InitializerDataset.AgentProfileDefinition profile) throws Exception {
+        Map<String, Object> config = SimpleJson.object(context.http().get("/agents/" + encodedId + "/prompts"));
+        require(!Boolean.TRUE.equals(config.get("builtin")),
+                "人设初始化写到了内置智能体上: " + profile.name());
+        Map<String, String> actual = new LinkedHashMap<>();
+        for (Object item : SimpleJson.array(config.get("slots"))) {
+            Map<String, Object> slot = SimpleJson.object(item);
+            actual.put(SimpleJson.string(slot, "slotKey"), SimpleJson.string(slot, "content"));
+        }
+        for (Map.Entry<String, String> expected : profile.prompts().entrySet()) {
+            String content = actual.get(expected.getKey());
+            require(content != null && !content.isBlank(),
+                    "人设槽位写入后回读为空: " + expected.getKey());
+            require(content.equals(expected.getValue()),
+                    "人设槽位回读内容与数据集不一致: " + expected.getKey());
+        }
+
+        Map<String, Object> listing = SimpleJson.object(context.http().get("/agents"));
+        boolean activated = false;
+        for (Object item : SimpleJson.array(listing.get("agents"))) {
+            Map<String, Object> agent = SimpleJson.object(item);
+            if (profile.name().equals(SimpleJson.string(agent, "name"))) {
+                activated = Boolean.TRUE.equals(agent.get("active"));
+            }
+        }
+        require(activated, "人设已写入但没有激活: " + profile.name());
     }
 
     static void warmup(InitializerContext context) throws Exception {
@@ -319,7 +522,7 @@ final class InitializationActions {
      * 预热只补对话数据，跳过的轮次不影响已经建好的知识库、文档和意图，因此汇报完照常按成功收尾
      */
     private static void reportWarmup(WarmupRun run, int questionCount, int totalTurns) {
-        if (run.skippedTurns.isEmpty() && run.missingFollowUps.isEmpty()) {
+        if (run.skippedTurns.isEmpty()) {
             System.out.printf("[warmup] 全部演示问题已跑通：问题 %d 个，共 %d 轮%n", questionCount, totalTurns);
             return;
         }
@@ -327,10 +530,6 @@ final class InitializationActions {
             System.out.printf("[warmup] 提问完成 %d/%d 轮，重试后仍失败的 %d 轮已跳过：%s%n",
                     totalTurns - run.skippedTurns.size(), totalTurns, run.skippedTurns.size(),
                     String.join("、", run.skippedTurns));
-        }
-        if (!run.missingFollowUps.isEmpty()) {
-            System.out.printf("[warmup] 答案已落库但没有推荐追问的 %d 轮：%s%n",
-                    run.missingFollowUps.size(), String.join("、", run.missingFollowUps));
         }
         System.out.println("[warmup] 缺的只是对话数据，环境仍然可用，补齐单独重跑 WarmupMain 即可");
     }
@@ -369,9 +568,8 @@ final class InitializationActions {
         if (result == null) {
             return null;
         }
-        String recommended = recommendFollowUps(context, run, label, result.messageId());
-        System.out.printf("[warmup] %s 完成：conversationId=%s, 回答 %d 字, 推荐追问 %s, 耗时 %d 秒%n",
-                label, result.conversationId(), result.answerLength(), recommended,
+        System.out.printf("[warmup] %s 完成：conversationId=%s, 回答 %d 字, 耗时 %d 秒%n",
+                label, result.conversationId(), result.answerLength(),
                 Duration.between(started, Instant.now()).toSeconds());
         return result.conversationId();
     }
@@ -384,7 +582,7 @@ final class InitializationActions {
             throws InterruptedException {
         for (int attempt = 1; ; attempt++) {
             try {
-                return context.http().chatStream(text, conversationId, false, run.timeout);
+                return context.http().chatStream(text, conversationId, run.timeout);
             } catch (InterruptedException ex) {
                 throw ex;
             } catch (Exception ex) {
@@ -400,40 +598,6 @@ final class InitializationActions {
     }
 
     /**
-     * 推荐追问由前端在答案结束后单独触发，预热必须补这一次调用，否则历史会话点开是没有追问的
-     * 答案此时已经落库，追问生成失败只让这条消息少了追问，不影响本轮和后续轮次
-     */
-    private static String recommendFollowUps(InitializerContext context, WarmupRun run, String label,
-                                             String messageId) throws InterruptedException {
-        for (int attempt = 1; ; attempt++) {
-            String failure;
-            try {
-                Object data = context.http().postEmpty("/conversations/messages/"
-                        + RagentHttpClient.encodePath(messageId) + "/recommended-questions");
-                Map<String, Object> payload = SimpleJson.object(data);
-                String status = SimpleJson.string(payload, "status");
-                // EMPTY 是已落库的负缓存，FAILED 才是什么都没写下去
-                if (!"FAILED".equals(status)) {
-                    Object questions = payload.get("questions");
-                    return status + "(" + (questions instanceof List<?> list ? list.size() : 0) + ")";
-                }
-                failure = "模型没有返回可用结果";
-            } catch (InterruptedException ex) {
-                throw ex;
-            } catch (Exception ex) {
-                failure = ex.getMessage();
-            }
-            if (attempt >= run.attempts) {
-                System.out.printf("[warmup] %s 连续 %d 次生成推荐追问失败，只缺这条会话的追问：%s%n",
-                        label, attempt, failure);
-                run.missingFollowUps.add(label);
-                return "SKIPPED";
-            }
-            Thread.sleep(run.retryMillis);
-        }
-    }
-
-    /**
      * 一次预热的执行参数与跳过记录
      */
     private static final class WarmupRun {
@@ -442,7 +606,6 @@ final class InitializationActions {
         private final int attempts;
         private final long retryMillis;
         private final List<String> skippedTurns = new ArrayList<>();
-        private final List<String> missingFollowUps = new ArrayList<>();
 
         private WarmupRun(InitializerConfig config) {
             this.timeout = Duration.ofSeconds(config.getInt("warmup.timeout-seconds", 600));
@@ -466,6 +629,7 @@ final class InitializationActions {
                 "知识库总数校验失败，actual=" + baseByCollection.size());
 
         int documentCount = 0;
+        Set<String> allDocumentNames = new HashSet<>();
         for (InitializerDataset.KnowledgeBaseDefinition definition : context.dataset().knowledgeBases()) {
             Map<String, Object> base = baseByCollection.get(definition.collectionName());
             require(base != null, "缺少知识库: " + definition.collectionName());
@@ -474,6 +638,7 @@ final class InitializationActions {
             for (Path path : context.dataset().documents(definition)) {
                 expectedNames.add(path.getFileName().toString());
             }
+            allDocumentNames.addAll(expectedNames);
             require(documents.size() == expectedNames.size(),
                     "知识库文档数量不一致: " + definition.name() + ", expected=" + expectedNames.size()
                             + ", actual=" + documents.size());
@@ -516,8 +681,92 @@ final class InitializationActions {
             require(actualQuestionTexts.contains(definition.text()), "缺少示例问题: " + definition.ref());
         }
 
-        System.out.printf("[verify] 通过：knowledgeBases=%d, documents=%d, intents=%d, questions=%d%n",
-                baseByCollection.size(), documentCount, intents.size(), questions.size());
+        List<Map<String, Object>> skills = fetchAllPages(context, "/agent-skills");
+        require(skills.size() == context.config().getInt("verification.skill-count",
+                        context.dataset().skills().size()),
+                "技能总数校验失败，actual=" + skills.size());
+        Map<String, Map<String, Object>> skillByCode = new HashMap<>();
+        skills.forEach(skill -> skillByCode.put(SimpleJson.string(skill, "skillCode"), skill));
+        for (InitializerDataset.SkillDefinition definition : context.dataset().skills()) {
+            Map<String, Object> actual = skillByCode.get(definition.skillCode());
+            require(actual != null, "缺少技能: " + definition.skillCode());
+            List<Object> toolIds = SimpleJson.array(actual.get("toolIds"));
+            require(toolIds.size() == definition.toolIds().size(),
+                    "技能解锁的工具数量不一致: " + definition.skillCode());
+            for (String toolId : definition.toolIds()) {
+                require(toolIds.stream().map(String::valueOf).anyMatch(toolId::equals),
+                        "技能没有解锁预期工具: " + definition.skillCode() + " -> " + toolId);
+            }
+        }
+
+        verifyAgentProfile(context);
+        verifyBizDatabase(context, allDocumentNames);
+
+        System.out.printf("[verify] 通过：knowledgeBases=%d, documents=%d, intents=%d, questions=%d, skills=%d%n",
+                baseByCollection.size(), documentCount, intents.size(), questions.size(), skills.size());
+    }
+
+    /**
+     * 当前激活的必须是数据集声明的那份人设，且槽位内容与数据集一致
+     * <p>
+     * 写入那一步已经回读校验过一次，这里重来是因为中间还隔着几步：cleanup 删过非内置人设，
+     * 手工按单步入口跑的时候顺序很容易错开
+     */
+    private static void verifyAgentProfile(InitializerContext context) throws Exception {
+        InitializerDataset.AgentProfileDefinition profile = context.dataset().agentProfile();
+        if (profile == null) {
+            return;
+        }
+        String agentId = findAgentIdByName(context, profile.name());
+        require(agentId != null, "数据集声明的人设不存在: " + profile.name());
+        verifyAgentPrompts(context, RagentHttpClient.encodePath(agentId), profile);
+        System.out.println("[verify] 人设已激活: " + profile.name());
+    }
+
+    /**
+     * 业务库行数，外加这套数据集唯一的跨库约束：库里的每款设备，知识库里都要有同名详情文档
+     * <p>
+     * 少了这条约束，商品工具筛出来的款会有查不到详情的，而两侧各自都是「对」的。
+     * 配件不参与这条：它们按二级品类合写导购篇，一件一篇既写不完也会把检索池灌满近似文档
+     */
+    private static void verifyBizDatabase(InitializerContext context, Set<String> documentNames) throws Exception {
+        if (!context.hasBizDatabase()) {
+            return;
+        }
+        long spus = context.bizJdbc().queryLong("SELECT count(*) FROM t_product");
+        int expectedSpus = context.config().requireInt("verification.biz-spu-count");
+        require(spus == expectedSpus,
+                "业务库商品款行数校验失败，expected=" + expectedSpus + ", actual=" + spus);
+
+        long skus = context.bizJdbc().queryLong("SELECT count(*) FROM t_product_sku");
+        int expectedSkus = context.config().requireInt("verification.biz-sku-count");
+        require(skus == expectedSkus,
+                "业务库商品配置行数校验失败，expected=" + expectedSkus + ", actual=" + skus);
+
+        List<List<String>> deviceRows = context.bizJdbc()
+                .queryRows("SELECT spu_code FROM t_product WHERE category <> '配件' ORDER BY spu_code");
+        for (List<String> row : deviceRows) {
+            require(documentNames.contains(row.get(0) + ".md"),
+                    "业务库里的设备在知识库里没有详情文档: " + row.get(0));
+        }
+
+        long orphans = context.bizJdbc()
+                .queryLong("SELECT count(*) FROM t_product_sku s"
+                        + " LEFT JOIN t_product p ON p.spu_code = s.spu_code WHERE p.spu_code IS NULL");
+        require(orphans == 0, "存在挂不到商品款上的配置行，count=" + orphans);
+
+        long orders = context.bizJdbc().queryLong("SELECT count(*) FROM t_order");
+        int expectedOrders = context.config().requireInt("verification.biz-order-count");
+        require(orders == expectedOrders,
+                "业务库订单行数校验失败，expected=" + expectedOrders + ", actual=" + orders);
+
+        long coupons = context.bizJdbc().queryLong("SELECT count(*) FROM t_coupon");
+        int expectedCoupons = context.config().requireInt("verification.biz-coupon-count");
+        require(coupons == expectedCoupons,
+                "业务库券模板行数校验失败，expected=" + expectedCoupons + ", actual=" + coupons);
+
+        System.out.printf("[verify] 业务库通过：spus=%d, skus=%d, orders=%d, coupons=%d%n",
+                spus, skus, orders, coupons);
     }
 
     private static void deleteAllDocuments(InitializerContext context) throws Exception {
@@ -561,6 +810,8 @@ final class InitializationActions {
                 + "AND update_time >= NOW() - INTERVAL '" + interval + "')";
         long runningRows = context.jdbc().queryLong(sql);
         int activeRedis = context.redis().scan("ragent:agent:running:*").size()
+                + context.redis().scan("ragent:agent:run-lock:*").size()
+                + context.redis().scan("ragent:agent:run-permit:*").size()
                 + context.redis().scan("ragent:stream:owner:*").size();
         require(runningRows == 0 && activeRedis == 0,
                 "检测到运行中的任务，拒绝初始化: db=" + runningRows + ", redis=" + activeRedis);

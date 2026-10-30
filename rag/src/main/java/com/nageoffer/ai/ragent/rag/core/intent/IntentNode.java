@@ -76,14 +76,6 @@ public class IntentNode {
     private List<IntentNode> children = new ArrayList<>();
 
     /**
-     * 预计算好的嵌入向量
-     * 仅向量意图识别测试使用
-     */
-    @Deprecated
-    @Builder.Default
-    private float[] embedding = null;
-
-    /**
      * 仅用于排查/打印的全路径，如「集团信息化 > 人事」
      */
     @Builder.Default
@@ -113,6 +105,11 @@ public class IntentNode {
     private String mcpToolId;
 
     /**
+     * 执行工具前是否需要用户确认（仅对 kind=MCP 有意义）
+     */
+    private boolean requireConfirm;
+
+    /**
      * 节点级检索 TopK（可选）
      * 未配置时回退到全局 TopK
      */
@@ -127,12 +124,6 @@ public class IntentNode {
      * 场景用的完整 Prompt 模板（可选）
      */
     private String promptTemplate;
-
-    /**
-     * 参数提取提示词模板（MCP 模式专属）
-     * 如果配置了此字段，MCP 参数提取时使用自定义提示词
-     */
-    private String paramPromptTemplate;
 
     /**
      * 是否为“最终节点”（叶子节点）：

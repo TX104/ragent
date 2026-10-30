@@ -36,6 +36,7 @@ public class IntentNodeUpdateRequest {
     private String description;
     private List<String> examples;
     private String mcpToolId;
+    private Integer requireConfirm;
     private String collectionName;
     private List<String> collectionNames;
     private Integer topK;
@@ -44,5 +45,4 @@ public class IntentNodeUpdateRequest {
     private Integer enabled;
     private String promptSnippet;
     private String promptTemplate;
-    private String paramPromptTemplate;
 }

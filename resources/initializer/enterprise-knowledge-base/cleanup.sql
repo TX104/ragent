@@ -10,6 +10,9 @@ TRUNCATE TABLE
     t_agent_state,
     t_agent_message,
     t_agent_conversation,
+    t_agent_memory,
+    t_agent_memory_cursor,
+    t_agent_context_compaction,
     t_rag_trace_node,
     t_rag_trace_run,
     t_ingestion_task_node,
@@ -23,8 +26,21 @@ TRUNCATE TABLE
     t_knowledge_document,
     t_knowledge_vector,
     t_intent_node,
+    t_agent_skill,
     t_query_term_mapping,
     t_sample_question,
     t_knowledge_base,
     t_biz_change_log
 RESTART IDENTITY;
+
+-- Delete non-builtin agent profiles row by row; truncating these two tables would remove the builtin
+-- agent itself and the fallback target for every empty slot. Order matters: prompts first, profile last.
+-- Afterwards no profile is active and all slots fall back to the builtin one, which is exactly the
+-- state this dataset expects. Another dataset may have left an activated profile behind.
+DELETE
+FROM t_agent_prompt
+WHERE agent_id IN (SELECT id FROM t_agent_profile WHERE builtin = 0);
+
+DELETE
+FROM t_agent_profile
+WHERE builtin = 0;

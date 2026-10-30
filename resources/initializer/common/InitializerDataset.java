@@ -27,17 +27,24 @@ import java.util.stream.Stream;
 /** Loads and validates one immutable agent-type initialization dataset. */
 final class InitializerDataset {
 
+    private static final String PROMPT_KEY_PREFIX = "prompt.";
+
     private final Path agentTypeDir;
     private final List<KnowledgeBaseDefinition> knowledgeBases;
     private final List<IntentDefinition> intents;
     private final List<QuestionDefinition> questions;
+    private final List<SkillDefinition> skills;
+    private final AgentProfileDefinition agentProfile;
 
     private InitializerDataset(Path agentTypeDir, List<KnowledgeBaseDefinition> knowledgeBases,
-                               List<IntentDefinition> intents, List<QuestionDefinition> questions) {
+                               List<IntentDefinition> intents, List<QuestionDefinition> questions,
+                               List<SkillDefinition> skills, AgentProfileDefinition agentProfile) {
         this.agentTypeDir = agentTypeDir;
         this.knowledgeBases = knowledgeBases;
         this.intents = intents;
         this.questions = questions;
+        this.skills = skills;
+        this.agentProfile = agentProfile;
     }
 
     static InitializerDataset load(Path agentTypeDir) throws IOException {
@@ -48,7 +55,10 @@ final class InitializerDataset {
         List<KnowledgeBaseDefinition> knowledgeBases = loadKnowledgeBases(normalized);
         List<IntentDefinition> intents = loadIntents(normalized, knowledgeBases);
         List<QuestionDefinition> questions = loadQuestions(normalized);
-        InitializerDataset dataset = new InitializerDataset(normalized, knowledgeBases, intents, questions);
+        List<SkillDefinition> skills = loadSkills(normalized);
+        AgentProfileDefinition agentProfile = loadAgentProfile(normalized);
+        InitializerDataset dataset = new InitializerDataset(
+                normalized, knowledgeBases, intents, questions, skills, agentProfile);
         dataset.validate();
         return dataset;
     }
@@ -67,6 +77,17 @@ final class InitializerDataset {
 
     List<QuestionDefinition> questions() {
         return questions;
+    }
+
+    List<SkillDefinition> skills() {
+        return skills;
+    }
+
+    /**
+     * 数据集没有 agent-profile.properties 时返回 null，人设初始化整步跳过
+     */
+    AgentProfileDefinition agentProfile() {
+        return agentProfile;
     }
 
     int documentCount() throws IOException {
@@ -182,6 +203,25 @@ final class InitializerDataset {
                 throw new IllegalArgumentException("演示问题 ref 重复: " + question.ref());
             }
         }
+
+        Set<String> availableTools = new HashSet<>();
+        for (IntentDefinition intent : intents) {
+            if (intent.enabled() && intent.mcpToolId() != null) {
+                availableTools.add(intent.mcpToolId());
+            }
+        }
+        Set<String> skillCodes = new HashSet<>();
+        for (SkillDefinition skill : skills) {
+            if (!skillCodes.add(skill.skillCode())) {
+                throw new IllegalArgumentException("技能 skill-code 重复: " + skill.skillCode());
+            }
+            for (String toolId : skill.toolIds()) {
+                if (!availableTools.contains(toolId)) {
+                    throw new IllegalArgumentException("技能解锁的工具不在本数据集已启用的 MCP 意图节点中: "
+                            + skill.skillCode() + " -> " + toolId);
+                }
+            }
+        }
     }
 
     private static List<KnowledgeBaseDefinition> loadKnowledgeBases(Path agentTypeDir) throws IOException {
@@ -233,12 +273,12 @@ final class InitializerDataset {
                         trimToNull(values.getProperty("description")),
                         split(values.getProperty("examples"), "\\|"),
                         trimToNull(values.getProperty("mcp-tool-id")),
+                        optionalBoolean(values, "require-confirm", false),
                         optionalInt(values, "top-k", file),
                         requiredInt(values, "sort-order", file),
                         optionalBoolean(values, "enabled", true),
                         readOptionalText(agentTypeDir, values.getProperty("prompt-snippet-file")),
-                        readOptionalText(agentTypeDir, values.getProperty("prompt-template-file")),
-                        readOptionalText(agentTypeDir, values.getProperty("param-prompt-template-file"))
+                        readOptionalText(agentTypeDir, values.getProperty("prompt-template-file"))
                 ));
             }
         }
@@ -265,6 +305,75 @@ final class InitializerDataset {
             ));
         }
         return List.copyOf(result);
+    }
+
+    /**
+     * 技能是写给模型看的办事手册，正文体量远超单行 properties，所以正文单独放 .md，properties 只留元数据
+     */
+    private static List<SkillDefinition> loadSkills(Path agentTypeDir) throws IOException {
+        Path skillsDir = agentTypeDir.resolve("skills");
+        if (!Files.isDirectory(skillsDir)) {
+            return List.of();
+        }
+        List<SkillDefinition> result = new ArrayList<>();
+        try (Stream<Path> paths = Files.list(skillsDir)) {
+            for (Path file : paths.filter(path -> path.getFileName().toString().endsWith(".properties"))
+                    .sorted().toList()) {
+                Properties values = InitializerConfig.loadProperties(file);
+                String content = readOptionalText(agentTypeDir,
+                        required(values, "content-file", file.toString()));
+                if (content == null || content.isBlank()) {
+                    throw new IllegalArgumentException("技能正文为空: " + file);
+                }
+                result.add(new SkillDefinition(
+                        required(values, "skill-code", file.toString()),
+                        required(values, "name", file.toString()),
+                        trimToNull(values.getProperty("description")),
+                        content,
+                        split(values.getProperty("tool-ids"), ","),
+                        requiredInt(values, "sort-order", file),
+                        optionalBoolean(values, "enabled", true)
+                ));
+            }
+        }
+        result.sort(Comparator.comparingInt(SkillDefinition::sortOrder));
+        return List.copyOf(result);
+    }
+
+    /**
+     * 人设是可选的：企业助手沿用内置那份，只有需要换身份的数据集才放这个文件
+     * <p>
+     * 槽位名不在这里校验合法性——枚举在服务端，抄一份到这里迟早和它对不上；写错的槽位名在第一次 PUT 就被服务端拒掉
+     */
+    private static AgentProfileDefinition loadAgentProfile(Path agentTypeDir) throws IOException {
+        Path file = agentTypeDir.resolve("agent-profile.properties");
+        if (!Files.isRegularFile(file)) {
+            return null;
+        }
+        Properties values = InitializerConfig.loadProperties(file);
+        Map<String, String> prompts = new LinkedHashMap<>();
+        for (String key : values.stringPropertyNames().stream().sorted().toList()) {
+            if (!key.startsWith(PROMPT_KEY_PREFIX)) {
+                continue;
+            }
+            String slotKey = key.substring(PROMPT_KEY_PREFIX.length()).trim();
+            if (slotKey.isEmpty()) {
+                throw new IllegalArgumentException("人设提示词槽位名为空: " + file);
+            }
+            String content = readOptionalText(agentTypeDir, values.getProperty(key));
+            if (content == null || content.isBlank()) {
+                throw new IllegalArgumentException("人设提示词正文为空: " + slotKey + " @ " + file);
+            }
+            prompts.put(slotKey, content);
+        }
+        if (prompts.isEmpty()) {
+            throw new IllegalArgumentException("人设至少要填一个提示词槽位，否则新建的智能体与内置完全一样: " + file);
+        }
+        return new AgentProfileDefinition(
+                required(values, "name", file.toString()),
+                trimToNull(values.getProperty("description")),
+                trimToNull(values.getProperty("avatar")),
+                Map.copyOf(prompts));
     }
 
     private static String readOptionalText(Path agentTypeDir, String relative) throws IOException {
@@ -365,8 +474,15 @@ final class InitializerDataset {
 
     record IntentDefinition(String code, String name, int level, String parentCode, int kind,
                             String knowledgeBaseRef, String description, List<String> examples,
-                            String mcpToolId, Integer topK, int sortOrder, boolean enabled,
-                            String promptSnippet, String promptTemplate, String paramPromptTemplate) {
+                            String mcpToolId, boolean requireConfirm, Integer topK, int sortOrder, boolean enabled,
+                            String promptSnippet, String promptTemplate) {
+    }
+
+    record SkillDefinition(String skillCode, String name, String description, String content,
+                           List<String> toolIds, int sortOrder, boolean enabled) {
+    }
+
+    record AgentProfileDefinition(String name, String description, String avatar, Map<String, String> prompts) {
     }
 
     record QuestionDefinition(String ref, String title, String description, String text, List<String> followUps) {

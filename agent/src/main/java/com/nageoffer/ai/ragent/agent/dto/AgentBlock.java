@@ -23,9 +23,10 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.List;
+
 /**
- * Agent 运行轨迹块：一轮回复内按事件顺序排列的 reasoning / answer / tool 片段
- * 随消息落库供历史回放还原时间线
+ * Agent 运行轨迹块：按事件顺序排列的 reasoning / answer / tool / confirm / error 片段，随消息落库
  */
 @Data
 @NoArgsConstructor
@@ -35,13 +36,27 @@ import lombok.NoArgsConstructor;
 public class AgentBlock {
 
     /**
-     * reasoning / answer / tool
+     * durationSource 值：耗时量的是这条工具自己的执行体
+     */
+    public static final String DURATION_SOURCE_TOOL = "tool";
+
+    /**
+     * kind 取值，产出方与读取方共用这一套字面量
+     */
+    public static final String KIND_ANSWER = "answer";
+    public static final String KIND_REASONING = "reasoning";
+    public static final String KIND_ERROR = "error";
+    public static final String KIND_TOOL = "tool";
+    public static final String KIND_CONFIRM = "confirm";
+
+    /**
+     * reasoning / answer / tool / confirm / error
      */
     private String kind;
 
     /**
-     * 产生时刻 yyyy-MM-dd'T'HH:mm:ss，不带时区偏移按本地时区解析；展示成什么样由前端定
-     * 历史数据是 HH:mm:ss，前端两种都认
+     * 块产生时刻 yyyy-MM-dd'T'HH:mm:ss（历史 HH:mm:ss，前端两种都认）
+     * 工具块是模型开始吐参数的时刻，不是执行起点，量耗时看 startedAt
      */
     private String at;
 
@@ -61,7 +76,8 @@ public class AgentBlock {
     private String displayName;
 
     /**
-     * tool 终态 done / interrupted
+     * tool 调用状态 pending / running / awaiting / done / failed / denied / interrupted；
+     * confirm 用户决定 pending / approved / denied，expired 表示失效；approved 不代表工具执行成功
      */
     private String status;
 
@@ -69,4 +85,45 @@ public class AgentBlock {
      * tool 结果文本，超长截断
      */
     private String result;
+
+    /**
+     * 供应商侧的 tool_call id，与上下文里 tool_use / tool_result 同源；端点不回时留空
+     */
+    private String toolCallId;
+
+    /**
+     * 同批工具共享的批次号，未执行的块没有批
+     */
+    private String batchId;
+
+    /**
+     * 组内序号（0 基），同名并行调用靠它区分先后
+     */
+    private Integer callIndex;
+
+    /**
+     * 起点 epoch millis（服务端时刻）
+     * 工具块：进入工具体，不含模型吐参数阶段；文本块：首个增量到达
+     */
+    private Long startedAt;
+
+    /**
+     * 终点 epoch millis（服务端时刻），断在半路留空
+     */
+    private Long endedAt;
+
+    /**
+     * 耗时，两端齐了才有
+     */
+    private Long durationMs;
+
+    /**
+     * 耗时口径 tool / batch，缺省即 batch（老数据整批共享）；文本块留空
+     */
+    private String durationSource;
+
+    /**
+     * confirm 块待用户裁决的工具调用，整卡一次决策，不逐条勾选
+     */
+    private List<AgentConfirmCall> calls;
 }

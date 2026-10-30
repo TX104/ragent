@@ -19,6 +19,7 @@ public final class InitializeMain {
             InitializationActions.initializeKnowledgeBases(context);
             InitializationActions.initializeDocuments(context);
             InitializationActions.initializeIntentTree(context);
+            InitializationActions.initializeSkills(context);
             InitializationActions.initializeSampleQuestions(context);
             InitializationActions.verify(context);
             InitializationActions.warmup(context);

@@ -42,6 +42,11 @@ public class IntentNodeCreateRequest {
     private String description;
     private List<String> examples;
     private String mcpToolId;
+
+    /**
+     * 执行前是否需要用户确认：0=否，1=是（仅对 kind=2 有意义）
+     */
+    private Integer requireConfirm;
     private Integer topK;
     private Integer kind;
     private Integer sortOrder;
@@ -57,8 +62,4 @@ public class IntentNodeCreateRequest {
      */
     private String promptTemplate;
 
-    /**
-     * 参数提取提示词模板（MCP模式专属）
-     */
-    private String paramPromptTemplate;
 }

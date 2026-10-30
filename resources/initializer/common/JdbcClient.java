@@ -6,6 +6,7 @@
  */
 package com.nageoffer.ai.ragent.initializer;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
@@ -25,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.function.Predicate;
 import java.util.jar.JarEntry;
@@ -33,28 +35,34 @@ import java.util.logging.Logger;
 import java.util.stream.Stream;
 
 /** Executes fixed initialization SQL through JDBC without requiring a host-installed psql command. */
-final class JdbcClient implements AutoCloseable {
+final class JdbcClient implements Closeable {
 
     private static final String POSTGRES_DRIVER_CLASS = "org.postgresql.Driver";
 
     private final InitializerConfig config;
+    /**
+     * 配置项前缀，平台库是 database，业务库是 biz-database
+     * 两个库在同一个 PostgreSQL 实例上但互不知情，连接身份必须各配各的
+     */
+    private final String prefix;
     private URLClassLoader driverClassLoader;
     private Driver registeredDriver;
     private Path extractedDriver;
 
-    JdbcClient(InitializerConfig config) {
+    JdbcClient(InitializerConfig config, String prefix) {
         this.config = config;
+        this.prefix = prefix;
     }
 
     String description() {
-        return "PostgreSQL JDBC " + config.require("database.host") + ":"
-                + config.getInt("database.port", 5432) + "/" + config.require("database.name");
+        return "PostgreSQL JDBC " + config.require(prefix + ".host") + ":"
+                + config.getInt(prefix + ".port", 5432) + "/" + config.require(prefix + ".name");
     }
 
     long queryLong(String sql) throws SQLException, IOException {
         try (Connection connection = openConnection();
              Statement statement = connection.createStatement()) {
-            statement.setQueryTimeout(config.getInt("database.statement-timeout-seconds", 120));
+            statement.setQueryTimeout(config.getInt(prefix + ".statement-timeout-seconds", 120));
             try (ResultSet result = statement.executeQuery(sql)) {
                 if (!result.next()) {
                     throw new SQLException("JDBC 查询没有返回结果");
@@ -71,7 +79,7 @@ final class JdbcClient implements AutoCloseable {
     List<List<String>> queryRows(String sql) throws SQLException, IOException {
         try (Connection connection = openConnection();
              Statement statement = connection.createStatement()) {
-            statement.setQueryTimeout(config.getInt("database.statement-timeout-seconds", 120));
+            statement.setQueryTimeout(config.getInt(prefix + ".statement-timeout-seconds", 120));
             try (ResultSet result = statement.executeQuery(sql)) {
                 int columns = result.getMetaData().getColumnCount();
                 List<List<String>> rows = new ArrayList<>();
@@ -89,6 +97,18 @@ final class JdbcClient implements AutoCloseable {
     }
 
     /**
+     * 执行一条写语句并返回影响行数
+     * 只给机制回归造现场用：翻开关、推水位、灌语料都得动库，参数拼接同样经 literal 转义
+     */
+    int update(String sql) throws SQLException, IOException {
+        try (Connection connection = openConnection();
+             Statement statement = connection.createStatement()) {
+            statement.setQueryTimeout(config.getInt(prefix + ".statement-timeout-seconds", 120));
+            return statement.executeUpdate(sql);
+        }
+    }
+
+    /**
      * SQL 字符串字面量转义，只处理单引号，不接受反斜杠转义关闭的会话参数
      */
     static String literal(String value) {
@@ -96,10 +116,28 @@ final class JdbcClient implements AutoCloseable {
     }
 
     void executeScript(Path file) throws IOException, SQLException {
+        executeScript(file, Map.of());
+    }
+
+    /**
+     * 整份脚本一个事务，中途失败全回滚
+     * variables 是 ${NAME} 占位替换，业务库种子数据要把订单挂到运行期才知道的平台用户 ID 上；
+     * 替换值由调用方经 literal 转义，脚本里的占位符因此不带引号
+     */
+    void executeScript(Path file, Map<String, String> variables) throws IOException, SQLException {
         if (!Files.isRegularFile(file)) {
             throw new IllegalArgumentException("SQL 文件不存在: " + file.toAbsolutePath());
         }
-        List<String> statements = splitStatements(Files.readString(file, StandardCharsets.UTF_8));
+        String script = Files.readString(file, StandardCharsets.UTF_8);
+        for (Map.Entry<String, String> variable : variables.entrySet()) {
+            script = script.replace("${" + variable.getKey() + "}", variable.getValue());
+        }
+        int unresolved = script.indexOf("${");
+        if (unresolved >= 0) {
+            throw new IllegalArgumentException("SQL 脚本存在未替换的占位符: " + file.getFileName()
+                    + "，" + firstLine(script.substring(unresolved)));
+        }
+        List<String> statements = splitStatements(script);
         if (statements.isEmpty()) {
             throw new IllegalArgumentException("SQL 文件中没有可执行语句: " + file.toAbsolutePath());
         }
@@ -108,11 +146,11 @@ final class JdbcClient implements AutoCloseable {
             try {
                 for (String sql : statements) {
                     if (sql.stripLeading().startsWith("\\")) {
-                        throw new IllegalArgumentException("cleanup.sql 不能包含 psql 专用命令: "
+                        throw new IllegalArgumentException(file.getFileName() + " 不能包含 psql 专用命令: "
                                 + firstLine(sql));
                     }
                     try (Statement statement = connection.createStatement()) {
-                        statement.setQueryTimeout(config.getInt("database.statement-timeout-seconds", 120));
+                        statement.setQueryTimeout(config.getInt(prefix + ".statement-timeout-seconds", 120));
                         statement.execute(sql);
                     }
                 }
@@ -131,12 +169,12 @@ final class JdbcClient implements AutoCloseable {
     private Connection openConnection() throws SQLException, IOException {
         ensureDriverLoaded();
         Properties properties = new Properties();
-        properties.setProperty("user", config.require("database.username"));
-        properties.setProperty("password", config.get("database.password", ""));
+        properties.setProperty("user", config.require(prefix + ".username"));
+        properties.setProperty("password", config.get(prefix + ".password", ""));
         properties.setProperty("connectTimeout",
-                String.valueOf(config.getInt("database.connect-timeout-seconds", 5)));
+                String.valueOf(config.getInt(prefix + ".connect-timeout-seconds", 5)));
         properties.setProperty("ApplicationName", "ragent-initializer");
-        return DriverManager.getConnection(config.require("database.jdbc-url"), properties);
+        return DriverManager.getConnection(config.require(prefix + ".jdbc-url"), properties);
     }
 
     private synchronized void ensureDriverLoaded() throws SQLException, IOException {

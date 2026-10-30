@@ -36,7 +36,7 @@ final class RegressionContext implements AutoCloseable {
         this.config = config;
         this.arguments = arguments;
         this.http = new RagentHttpClient(config);
-        this.jdbc = new JdbcClient(config);
+        this.jdbc = new JdbcClient(config, "database");
         this.chat = new AgentChatClient(http, config);
         this.probe = new AgentStateProbe(jdbc);
     }

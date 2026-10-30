@@ -21,6 +21,7 @@ import {
   Share2,
   ShieldCheck,
   Settings,
+  Sparkles,
   Upload,
   Users,
   FolderKanban,
@@ -87,6 +88,11 @@ const menuGroups: MenuGroup[] = [
         label: "智能体管理",
         icon: Bot,
         iconClass: "admin-sidebar__item-icon--optical-lg"
+      },
+      {
+        path: "/admin/agent-skills",
+        label: "技能管理",
+        icon: Sparkles
       },
       {
         path: "/admin/knowledge",
@@ -178,6 +184,7 @@ const menuGroups: MenuGroup[] = [
 const breadcrumbMap: Record<string, string> = {
   dashboard: "Dashboard",
   agents: "智能体管理",
+  "agent-skills": "技能管理",
   knowledge: "知识库管理",
   "knowledge-graph": "知识图谱",
   "intent-tree": "意图树配置",

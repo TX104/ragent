@@ -25,6 +25,7 @@ import com.baomidou.mybatisplus.annotation.TableLogic;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.nageoffer.ai.ragent.agent.dao.handler.AgentBlockListTypeHandler;
 import com.nageoffer.ai.ragent.agent.dto.AgentBlock;
+import com.nageoffer.ai.ragent.agent.enums.AgentMessageStatus;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -56,8 +57,8 @@ public class AgentMessageDO {
     private String role;
 
     /**
-     * 终答正文，与用户所见逐字一致，不截断
-     * 唯一读者是改写上下文 loadRecentTurns 与前端的无 blocks 兜底，回放时间线不读它
+     * 用户消息存原话，助手消息存终答正文，与用户所见逐字一致，不截断
+     * 读者：消息列表接口（前端无 blocks 时兜底展示）、长期记忆抽取；回放时间线不读它
      */
     private String content;
 
@@ -67,7 +68,7 @@ public class AgentMessageDO {
     private String thinkingContent;
 
     /**
-     * 运行轨迹块（reasoning / answer / tool 有序序列），回放时间线的唯一来源
+     * 运行轨迹块（reasoning / answer / tool / confirm / error 有序序列），回放时间线的唯一来源
      * 与上面两个字段有意不等价：剔空块、工具结果截 20k，用作正文会丢字
      */
     @TableField(typeHandler = AgentBlockListTypeHandler.class)
@@ -76,9 +77,15 @@ public class AgentMessageDO {
     private String replyToMessageId;
 
     /**
-     * NORMAL / INTERRUPTED
+     * 参考：{@link AgentMessageStatus}
      */
     private String messageStatus;
+
+    /**
+     * 本轮 run 的服务端耗时，assistant 才有，旧数据为 null
+     * 替代 user/assistant createTime 差值：那个差值含排队且量不到确认续跑
+     */
+    private Long durationMs;
 
     @TableField(fill = FieldFill.INSERT)
     private Date createTime;

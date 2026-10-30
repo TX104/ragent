@@ -39,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ChatRequestThinkingParamTest {
 
     private static final String FIELD = "enable_thinking";
+    private static final String THINKING_OBJECT = "thinking";
 
     @Test
     void bailianShouldCarryThinkingFlagWhenEnabled() {
@@ -71,6 +72,26 @@ class ChatRequestThinkingParamTest {
     }
 
     /**
+     * DeepSeek 的方言是 thinking 对象，enable_thinking 发过去会被判为未知参数
+     */
+    @Test
+    void deepSeekShouldNeverCarryThinkingFlag() {
+        assertFalse(buildBody(new DeepSeekChatClient(), Boolean.TRUE).has(FIELD));
+        assertFalse(buildBody(new DeepSeekChatClient(), Boolean.FALSE).has(FIELD));
+        assertFalse(buildBody(new DeepSeekChatClient(), null).has(FIELD));
+    }
+
+    /**
+     * V4 系思考默认开启，关闭时必须显式发 disabled 而非省略整个对象
+     */
+    @Test
+    void deepSeekShouldCarryThinkingObject() {
+        assertEquals("enabled", thinkingType(buildBody(new DeepSeekChatClient(), Boolean.TRUE)));
+        assertEquals("disabled", thinkingType(buildBody(new DeepSeekChatClient(), Boolean.FALSE)));
+        assertEquals("disabled", thinkingType(buildBody(new DeepSeekChatClient(), null)));
+    }
+
+    /**
      * 聚合网关走 OpenAI 原生协议，带上该字段会被判为未知参数
      */
     @Test
@@ -84,6 +105,16 @@ class ChatRequestThinkingParamTest {
     void ollamaShouldNeverCarryThinkingFlag() {
         assertFalse(buildBody(new OllamaChatClient(), Boolean.TRUE).has(FIELD));
         assertFalse(buildBody(new OllamaChatClient(), Boolean.FALSE).has(FIELD));
+    }
+
+    /**
+     * thinking 对象同样是私有扩展，只许发给 DeepSeek
+     */
+    @Test
+    void otherProvidersShouldNeverCarryThinkingObject() {
+        assertFalse(buildBody(new BaiLianChatClient(), Boolean.TRUE).has(THINKING_OBJECT));
+        assertFalse(buildBody(new AIHubMixChatClient(), Boolean.TRUE).has(THINKING_OBJECT));
+        assertFalse(buildBody(new OllamaChatClient(), Boolean.TRUE).has(THINKING_OBJECT));
     }
 
     /**
@@ -134,6 +165,11 @@ class ChatRequestThinkingParamTest {
 
     private JsonObject buildBody(AbstractOpenAIStyleChatClient client, Boolean thinking) {
         return client.buildRequestBody(request(thinking), target(), false);
+    }
+
+    private String thinkingType(JsonObject body) {
+        assertTrue(body.has(THINKING_OBJECT), "请求体缺少 thinking 对象");
+        return body.getAsJsonObject(THINKING_OBJECT).get("type").getAsString();
     }
 
     private ChatRequest request(Boolean thinking) {

@@ -23,6 +23,8 @@ import { SampleQuestionPage } from "@/pages/admin/sample-questions/SampleQuestio
 import { QueryTermMappingPage } from "@/pages/admin/query-term-mapping/QueryTermMappingPage";
 import { AgentProfilePage } from "@/pages/admin/agents/AgentProfilePage";
 import { AgentPromptPage } from "@/pages/admin/agents/AgentPromptPage";
+import { AgentSkillPage } from "@/pages/admin/agent-skills/AgentSkillPage";
+import { AgentSkillEditPage } from "@/pages/admin/agent-skills/AgentSkillEditPage";
 import { UserListPage } from "@/pages/admin/users/UserListPage";
 import { useAuthStore } from "@/stores/authStore";
 
@@ -186,6 +188,14 @@ export const router = createBrowserRouter([
       {
         path: "agents/:agentId",
         element: <AgentPromptPage />
+      },
+      {
+        path: "agent-skills",
+        element: <AgentSkillPage />
+      },
+      {
+        path: "agent-skills/:skillId",
+        element: <AgentSkillEditPage />
       },
       {
         path: "users",

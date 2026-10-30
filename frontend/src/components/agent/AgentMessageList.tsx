@@ -1,10 +1,10 @@
 import * as React from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 
-import { AgentTurnItem, type AgentTurn } from "@/components/agent/AgentTurn";
+import { AgentTurnItem } from "@/components/agent/AgentTurn";
 import { AgentWelcomeScreen } from "@/components/agent/AgentWelcomeScreen";
 import { cn } from "@/lib/utils";
-import type { AgentMessage } from "@/types/agent";
+import type { AgentMessage, AgentTurn } from "@/types/agent";
 
 interface AgentMessageListProps {
   messages: AgentMessage[];
@@ -13,18 +13,19 @@ interface AgentMessageListProps {
   sessionKey?: string | null;
 }
 
-// 用户消息开启新一轮 紧随其后的助手消息配对入同一张 Turn 卡
+// 用户消息开启新一轮 其后的助手消息全部配对入同一张 Turn 卡
+// 一问对多答只出在确认续跑上：挂起那条与续答同属一次提问 拆两张卡会读成问了两次
 function groupTurns(messages: AgentMessage[]): AgentTurn[] {
   const turns: AgentTurn[] = [];
   for (const message of messages) {
     if (message.role === "user") {
-      turns.push({ id: message.id, index: turns.length + 1, user: message });
+      turns.push({ id: message.id, index: turns.length + 1, user: message, assistants: [] });
     } else {
       const last = turns[turns.length - 1];
-      if (last && !last.assistant) {
-        last.assistant = message;
+      if (last) {
+        last.assistants.push(message);
       } else {
-        turns.push({ id: message.id, index: turns.length + 1, assistant: message });
+        turns.push({ id: message.id, index: turns.length + 1, assistants: [message] });
       }
     }
   }

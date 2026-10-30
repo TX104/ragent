@@ -14,8 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
- * 单会话状态只读排查：不发起任何对话，只把 t_agent_state 里那条 payload 摊开
- * 用于回归跑完之后反复复查同一条会话，或者排查线上某条会话为什么忘了事
+ * 单会话状态只读排查：把 t_agent_state 里的 payload 摊开看
  */
 final class AgentMemoryProbeMain {
 
@@ -54,9 +53,16 @@ final class AgentMemoryProbeMain {
         System.out.println("  结构完整     " + (snapshot.structurallySound() ? "是"
                 : "否，孤儿 tool_use " + snapshot.orphanToolUses() + " / 孤儿 tool_result " + snapshot.orphanToolResults()));
         System.out.println("  锚点         " + anchor + " " + (snapshot.anchorPresent() ? "仍在 payload 里" : "已不在 payload 里"));
-        System.out.println("  会话摘要     " + (snapshot.summary().isBlank()
-                ? "无（P1 未实现时应为无）" : snapshot.summary().length() + " 字符")
-                + "，摘要消息 " + snapshot.summaryMessages() + " 条");
+        System.out.println("  会话摘要     " + snapshot.summaryMessages() + " 条摘要消息"
+                + (snapshot.summary().isBlank() ? "（本次没压缩过）"
+                : "，正文 " + snapshot.summary().length() + " 字符"));
+
+        // 摘要正文给人读的，没有可自动判的性质
+        if (!snapshot.summary().isBlank()) {
+            System.out.println();
+            System.out.println("=== 末代摘要正文（含围栏，与回填进上下文的那份逐字一致） ===");
+            System.out.println(snapshot.summary());
+        }
 
         System.out.println();
         System.out.println("=== tool_result 体量（降序） ===");
@@ -83,7 +89,7 @@ final class AgentMemoryProbeMain {
     }
 
     /**
-     * 默认沿用剧本里的锚点，让排查与回归看的是同一个词；剧本不在就要求显式传入
+     * 默认沿用剧本里的锚点，剧本不在就要求显式传入
      */
     private static String defaultAnchor(RegressionContext context) throws Exception {
         Path script = context.suiteDir().resolve("turns.properties");

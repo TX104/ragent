@@ -20,35 +20,63 @@ package com.nageoffer.ai.ragent.agent.service;
 import com.nageoffer.ai.ragent.agent.controller.vo.AgentConversationVO;
 import com.nageoffer.ai.ragent.agent.controller.vo.AgentMessageVO;
 import com.nageoffer.ai.ragent.agent.dto.AgentBlock;
+import com.nageoffer.ai.ragent.agent.dto.AgentConfirmSettlement;
 import com.nageoffer.ai.ragent.agent.enums.AgentMessageStatus;
-import com.nageoffer.ai.ragent.framework.convention.ChatMessage;
 
 import java.util.List;
 
 /**
- * Agent 会话最小 CRUD：建 / 列 / 历史 / 删，展示层双写与 AgentScope 状态存储互不感知
+ * Agent 会话管理：建会话、消息读写、确认卡片结算、删除
  */
 public interface AgentConversationService {
 
     /**
-     * 首问建会话（截断问题作标题），已存在则刷新最后活动时间，返回会话标题
+     * 首问使用服务端生成的新 ID 建会话，已有会话刷新最后活动时间，返回标题
      */
     String touchConversation(String conversationId, String userId, String question);
 
+    /**
+     * 保存用户消息
+     */
     String addUserMessage(String conversationId, String userId, String content);
 
+    /**
+     * 保存助手消息
+     */
     String addAssistantMessage(String conversationId, String userId, String content, String thinkingContent,
-                               List<AgentBlock> blocks, String replyToMessageId, AgentMessageStatus status);
-
-    List<AgentConversationVO> listByUserId(String userId);
-
-    List<AgentMessageVO> listMessages(String conversationId, String userId);
+                               List<AgentBlock> blocks, String replyToMessageId, AgentMessageStatus status,
+                               Long durationMs);
 
     /**
-     * 取最近若干轮已配对的 user/assistant 正文，按时间正序
-     * 供知识检索工具做改写指代消解，不含运行轨迹与深度思考内容
+     * 结算挂起的确认卡片：卡片状态改 approved/denied，消息状态改回 NORMAL
      */
-    List<ChatMessage> loadRecentTurns(String conversationId, String userId, int turns);
+    AgentConfirmSettlement settlePendingConfirm(String conversationId, String userId, String messageId, boolean approved);
+
+    /**
+     * 续跑前的检查：卡片还挂在待确认状态才放行，这里只读不落库
+     * 把卡片改成终态是 settlePendingConfirm 的事，要等流真的启动那一刻才做
+     */
+    AgentConfirmSettlement getPendingConfirm(String conversationId, String userId, String messageId);
+
+    /**
+     * Agent 状态里已无待确认工具，但卡片还是 pending，标记为 expired 以解除会话阻塞
+     */
+    void expirePendingConfirm(String conversationId, String userId, String messageId);
+
+    /**
+     * 校验当前用户的会话存在，并查询是否有待确认的操作；不存在或已删除时抛出异常
+     */
+    boolean hasPendingConfirm(String conversationId, String userId);
+
+    /**
+     * 查询用户的会话列表
+     */
+    List<AgentConversationVO> listByUserId(String userId);
+
+    /**
+     * 查询会话消息列表
+     */
+    List<AgentMessageVO> listMessages(String conversationId, String userId);
 
     /**
      * 手动改标题，空白标题拒绝
@@ -56,12 +84,12 @@ public interface AgentConversationService {
     void rename(String conversationId, String userId, String title);
 
     /**
-     * 逻辑删会话与消息，同时清掉该会话的 Agent 工作状态
+     * 删除会话、消息及对应的 Agent 状态
      */
     void delete(String conversationId, String userId);
 
     /**
-     * 批量逻辑删，逐条走单删以保证状态清理不漏
+     * 批量删除，逐条走 delete 保证状态清理不漏
      */
     void deleteBatch(List<String> conversationIds, String userId);
 }

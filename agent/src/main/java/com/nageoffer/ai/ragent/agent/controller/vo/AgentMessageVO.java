@@ -66,6 +66,11 @@ public class AgentMessageVO {
     private String messageStatus;
 
     /**
+     * 本轮 run 的服务端耗时，assistant 才有，旧数据为 null
+     */
+    private Long durationMs;
+
+    /**
      * 创建时间
      */
     private Date createTime;

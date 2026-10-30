@@ -55,9 +55,264 @@ const answer2 = `公司差旅报销依据《差旅费管理办法（2025 修订�
 
 出差五天预计可报销上限约 **4,000 元**（不含往返大交通）。`;
 
+// 服务端计时 fixture
+const T0 = Date.now() - 6 * 60000;
+const batched = (batchId: string, callIndex: number, startedAt: number, durationMs: number) => ({
+  batchId,
+  callIndex,
+  startedAt,
+  endedAt: startedAt + durationMs,
+  durationMs
+});
+// 文本块计时 fixture
+const streamed = (startedAt: number, durationMs: number) => ({
+  startedAt,
+  endedAt: startedAt + durationMs,
+  durationMs
+});
+
+/**
+ * timeline 视图截图自验：并行 / 单批 / 续跑 / 拒绝 / 中断 / 无计时
+ */
+function timelineMessages(): AgentMessage[] {
+  const leave = { toolCallId: "c9", name: "submit_leave", displayName: "提交请假单" };
+  const expense = { toolCallId: "c8", name: "submit_expense", displayName: "提交报销单" };
+  const room1 = { toolCallId: "m1", name: "meeting_room_book", displayName: "预订会议室" };
+  const room2 = { toolCallId: "m2", name: "meeting_room_book", displayName: "预订会议室" };
+  const rule = { toolCallId: "m3", name: "search_knowledge", displayName: "知识库检索" };
+  return [
+    { id: "tu1", role: "user", content: "同时查一下华东和华南两个区的季度销售", createdAt: at(6) },
+    {
+      id: "ta1",
+      role: "assistant",
+      content: "",
+      status: "done",
+      createdAt: at(6),
+      elapsedMs: 7200,
+      blocks: [
+        {
+          id: 1,
+          kind: "reasoning",
+          at: hms(6),
+          ...streamed(T0 - 2100, 2100),
+          text: "两个区互不依赖，一次并行检索就够，不必来回两轮。"
+        },
+        {
+          id: 2,
+          kind: "tool",
+          at: hms(6),
+          name: "search_knowledge",
+          displayName: "知识库检索",
+          status: "done",
+          toolCallId: "p1",
+          ...batched("r1-1", 0, T0, 1500),
+          result: JSON.stringify([{ doc: "华东区季度销售报表.xlsx", score: 0.92 }])
+        },
+        {
+          id: 3,
+          kind: "tool",
+          at: hms(6),
+          name: "search_knowledge",
+          displayName: "知识库检索",
+          status: "done",
+          toolCallId: "p2",
+          ...batched("r1-1", 1, T0, 1500),
+          result: JSON.stringify([{ doc: "华南区季度销售报表.xlsx", score: 0.89 }])
+        },
+        {
+          id: 4,
+          kind: "answer",
+          at: hms(5),
+          ...streamed(T0 + 1500, 3600),
+          text: "两区合计 4,286 万元，华东占比 68%。"
+        }
+      ]
+    },
+    { id: "tu2", role: "user", content: "帮我提交下周一到周三的年假", createdAt: at(4) },
+    {
+      id: "ta2",
+      role: "assistant",
+      content: "",
+      status: "done",
+      messageStatus: "AWAITING_CONFIRM",
+      createdAt: at(4),
+      elapsedMs: 1800,
+      blocks: [
+        {
+          id: 11,
+          kind: "confirm",
+          at: hms(4),
+          status: "approved",
+          calls: [{ ...leave, fields: [{ name: "days", label: "请假区间", value: "周一至周三" }] }]
+        },
+        // 挂起那条开了头 与续跑是同一次调用
+        { id: 12, kind: "tool", at: hms(4), status: "awaiting", ...leave }
+      ]
+    },
+    {
+      id: "ta3",
+      role: "assistant",
+      content: "",
+      status: "done",
+      createdAt: at(3),
+      elapsedMs: 2400,
+      blocks: [
+        {
+          id: 13,
+          kind: "tool",
+          at: hms(3),
+          status: "done",
+          ...leave,
+          ...batched("r2-0", 0, T0 + 60000, 800),
+          result: JSON.stringify({ requestNo: "LV-20260901-0007", state: "已提交" })
+        },
+        {
+          id: 14,
+          kind: "answer",
+          at: hms(3),
+          ...streamed(T0 + 60800, 1500),
+          text: "已提交，单号 LV-20260901-0007。"
+        }
+      ]
+    },
+    { id: "tu3", role: "user", content: "再把上个月的打车费报销提一下", createdAt: at(2) },
+    {
+      id: "ta4",
+      role: "assistant",
+      content: "",
+      status: "done",
+      messageStatus: "AWAITING_CONFIRM",
+      createdAt: at(2),
+      elapsedMs: 1600,
+      blocks: [
+        {
+          id: 21,
+          kind: "confirm",
+          at: hms(2),
+          status: "denied",
+          calls: [{ ...expense, fields: [{ name: "amount", label: "金额", value: "￥862.00" }] }]
+        },
+        { id: 22, kind: "tool", at: hms(2), status: "awaiting", ...expense }
+      ]
+    },
+    {
+      id: "ta5",
+      role: "assistant",
+      content: "",
+      status: "done",
+      createdAt: at(2),
+      elapsedMs: 900,
+      // 拒绝无执行窗口
+      blocks: [
+        { id: 23, kind: "tool", at: hms(2), status: "denied", ...expense },
+        { id: 24, kind: "answer", at: hms(2), text: "已取消，没有提交这笔报销。" }
+      ]
+    },
+    { id: "tu4", role: "user", content: "顺便看下明天上海的天气", createdAt: at(1) },
+    {
+      id: "ta6",
+      role: "assistant",
+      content: "",
+      status: "done",
+      messageStatus: "INTERRUPTED",
+      createdAt: at(1),
+      elapsedMs: 5200,
+      blocks: [
+        // 老会话 无批次无计时
+        {
+          id: 31,
+          kind: "tool",
+          at: hms(1),
+          name: "search_knowledge",
+          displayName: "知识库检索",
+          status: "done",
+          result: "（老会话数据 无计时字段）"
+        },
+        {
+          id: 32,
+          kind: "tool",
+          at: hms(1),
+          name: "weather_query",
+          displayName: "天气查询",
+          status: "interrupted",
+          toolCallId: "w1"
+        }
+      ]
+    },
+    { id: "tu5", role: "user", content: "订两间会议室，顺便查下会议室使用规定", createdAt: at(1) },
+    {
+      id: "ta7",
+      role: "assistant",
+      content: "",
+      status: "done",
+      messageStatus: "AWAITING_CONFIRM",
+      createdAt: at(1),
+      elapsedMs: 2100,
+      // 卡里点名两间会议室 同批检索只是跟着停
+      blocks: [
+        { id: 41, kind: "tool", at: hms(1), status: "awaiting", ...room1 },
+        { id: 42, kind: "tool", at: hms(1), status: "awaiting", ...room2 },
+        { id: 43, kind: "tool", at: hms(1), status: "awaiting", ...rule },
+        {
+          id: 44,
+          kind: "confirm",
+          at: hms(1),
+          status: "pending",
+          calls: [
+            { ...room1, fields: [{ name: "slot", label: "时段", value: "周三 10:00" }] },
+            { ...room2, fields: [{ name: "slot", label: "时段", value: "周三 14:00" }] }
+          ]
+        }
+      ]
+    },
+    { id: "tu6", role: "user", content: "把这两份手册都加载一下", createdAt: at(1) },
+    {
+      id: "ta8",
+      role: "assistant",
+      content: "",
+      status: "done",
+      createdAt: at(1),
+      elapsedMs: 700,
+      // 同名两次调用 折叠会丢一份耗时
+      blocks: [
+        {
+          id: 51,
+          kind: "tool",
+          at: hms(1),
+          status: "done",
+          toolCallId: "k1",
+          name: "load_skill",
+          displayName: "加载技能手册",
+          ...batched("r5-0", 0, T0 + 300000, 5),
+          // 逐条口径 缺此项会退回整批分支
+          durationSource: "tool",
+          result: "（手册已加载）"
+        },
+        {
+          id: 52,
+          kind: "tool",
+          at: hms(1),
+          status: "done",
+          toolCallId: "k2",
+          name: "load_skill",
+          displayName: "加载技能手册",
+          ...batched("r5-0", 1, T0 + 300001, 9),
+          durationSource: "tool",
+          result: "（手册已加载）"
+        },
+        { id: 53, kind: "answer", at: hms(1), text: "两份手册都已加载。" }
+      ]
+    }
+  ];
+}
+
 function buildMessages(): { messages: AgentMessage[]; isStreaming: boolean } {
   if (view === "welcome") {
     return { messages: [], isStreaming: false };
+  }
+
+  if (view === "timeline") {
+    return { messages: timelineMessages(), isStreaming: false };
   }
 
   const turns: AgentMessage[] = [
@@ -79,7 +334,7 @@ function buildMessages(): { messages: AgentMessage[]; isStreaming: boolean } {
           id: 11,
           kind: "reasoning",
           at: hms(9),
-          durationMs: 3400,
+          ...streamed(T0 - 180000, 3400),
           text: "用户需要销售数据分析与补货建议，先检索知识库中的季度报表，再结合环比趋势给出结论。\n需要注意南京的负增长是否与渠道库存有关。",
           open: false
         },
@@ -98,7 +353,13 @@ function buildMessages(): { messages: AgentMessage[]; isStreaming: boolean } {
           ]),
           open: false
         },
-        { id: 13, kind: "answer", at: hms(8), durationMs: 21600, text: answerMarkdown }
+        {
+          id: 13,
+          kind: "answer",
+          at: hms(8),
+          ...streamed(T0 - 175400, 21600),
+          text: answerMarkdown
+        }
       ]
     },
     {
@@ -128,7 +389,13 @@ function buildMessages(): { messages: AgentMessage[]; isStreaming: boolean } {
             "根据当前可用信息，差旅报销规定如下：\n\n---\n\n### 一、住宿标准\n\n- 一类城市（北京、上海、深圳）**650 元/晚**\n- 需提供增值税专用发票\n\n### 二、餐补\n\n- 150 元/天，按出差天数打包发放",
           open: false
         },
-        { id: 22, kind: "answer", at: hms(3), durationMs: 8100, text: answer2 }
+        {
+          id: 22,
+          kind: "answer",
+          at: hms(3),
+          ...streamed(T0 + 175000, 8100),
+          text: answer2
+        }
       ]
     }
   ];
@@ -220,20 +487,20 @@ const { messages, isStreaming } = buildMessages();
 // 原始帧抽屉预置几条样例帧
 const frames: AgentRawFrame[] = [
   { id: 1, ts: hms(1), name: "meta", data: { conversationId: "s-current", taskId: "t-1024" } },
-  { id: 2, ts: hms(1), name: "message", data: { type: "think", delta: "先检索知识库…" } },
+  { id: 2, ts: hms(1), name: "message", data: { type: "reasoning", delta: "先检索知识库…" } },
   {
     id: 3,
     ts: hms(1),
-    name: "tool",
-    data: { name: "search_knowledge", displayName: "知识库检索", status: "start" }
+    name: "block",
+    data: { kind: "tool", name: "search_knowledge", displayName: "知识库检索", status: "pending" }
   },
   {
     id: 4,
     ts: hms(0),
-    name: "tool",
-    data: { name: "search_knowledge", displayName: "知识库检索", status: "end", ok: true, result: "[…]" }
+    name: "block",
+    data: { kind: "tool", name: "search_knowledge", displayName: "知识库检索", status: "done", ok: true, result: "[…]" }
   },
-  { id: 5, ts: hms(0), name: "message", data: { type: "response", delta: "根据知识库…" } }
+  { id: 5, ts: hms(0), name: "message", data: { type: "answer", delta: "根据知识库…" } }
 ];
 
 useAuthStore.setState({ user: { userId: "1", username: "admin", role } as never });

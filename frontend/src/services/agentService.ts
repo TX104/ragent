@@ -16,6 +16,8 @@ export interface AgentMessageVO {
   // 旧数据为 null 由前端按持久化字段合成
   blocks?: AgentBlock[] | null;
   messageStatus?: AgentPersistedMessageStatus | null;
+  // 服务端耗时 assistant 才有
+  durationMs?: number | null;
   createTime?: string;
 }
 

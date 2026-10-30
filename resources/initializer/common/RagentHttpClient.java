@@ -66,6 +66,11 @@ final class RagentHttpClient implements AutoCloseable {
                 HttpRequest.BodyPublishers.ofString(SimpleJson.stringify(body), StandardCharsets.UTF_8), true);
     }
 
+    Object putJson(String path, Map<String, Object> body) throws IOException, InterruptedException {
+        return send("PUT", path, "application/json;charset=UTF-8",
+                HttpRequest.BodyPublishers.ofString(SimpleJson.stringify(body), StandardCharsets.UTF_8), true);
+    }
+
     Object postEmpty(String path) throws IOException, InterruptedException {
         return send("POST", path, null, HttpRequest.BodyPublishers.noBody(), true);
     }
@@ -95,9 +100,9 @@ final class RagentHttpClient implements AutoCloseable {
      * conversationId 为空表示新开会话，传入已有会话则作为追问，服务端据此带上历史
      * 对话接口失败时只断流不发错误事件，因此只有收到终止事件 done、且没出现 reject 和 cancel 才算成功
      */
-    ChatStreamResult chatStream(String question, String conversationId, boolean deepThinking, Duration timeout)
+    ChatStreamResult chatStream(String question, String conversationId, Duration timeout)
             throws IOException, InterruptedException {
-        String path = "/rag/v3/chat?question=" + encodeQuery(question) + "&deepThinking=" + deepThinking
+        String path = CHAT_PATH + "?question=" + encodeQuery(question)
                 + (conversationId == null || conversationId.isBlank()
                 ? "" : "&conversationId=" + encodeQuery(conversationId));
         HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + normalizePath(path)))
@@ -110,7 +115,7 @@ final class RagentHttpClient implements AutoCloseable {
         HttpResponse<Stream<String>> response = client.send(request, HttpResponse.BodyHandlers.ofLines());
         try (Stream<String> lines = response.body()) {
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new IOException("HTTP " + response.statusCode() + " GET /rag/v3/chat, question=" + question);
+                throw new IOException("HTTP " + response.statusCode() + " GET " + CHAT_PATH + ", question=" + question);
             }
             SseAccumulator accumulator = new SseAccumulator();
             // 请求超时只覆盖到响应头，流开始之后靠这里的截止时间兜住服务端一直不结束的情况
@@ -136,6 +141,14 @@ final class RagentHttpClient implements AutoCloseable {
     String authorization() {
         return requireToken("(caller-managed request)");
     }
+
+    /**
+     * 预热走 Agent 链而不是 RAG 直答链
+     * <p>
+     * 两条链是两个接口：示例问题在 Agent 对话页同样渲染成卡片，用户点下去发往这里，
+     * 而 engine.type=agent 时它才是主路径。只热 RAG 那条等于把用户最可能走的路留着不验
+     */
+    private static final String CHAT_PATH = "/agent/v1/chat";
 
     static String encodeQuery(String value) {
         return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");

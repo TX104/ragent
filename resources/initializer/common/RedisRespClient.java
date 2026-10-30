@@ -8,6 +8,7 @@ package com.nageoffer.ai.ragent.initializer;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -19,7 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /** Small RESP2 client for PING, SET NX EX, GET, SCAN and DEL/UNLINK. */
-final class RedisRespClient implements AutoCloseable {
+final class RedisRespClient implements Closeable {
 
     private final String host;
     private final int port;

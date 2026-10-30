@@ -45,7 +45,7 @@ final class ApplicationYamlConfig {
         String scheme = Boolean.parseBoolean(value(yaml, "server.ssl.enabled", "false")) ? "https" : "http";
         result.setProperty("server.base-url", scheme + "://" + address + ":" + port + contextPath);
 
-        applyPostgres(yaml, file, result);
+        applyDatasource(yaml, file, result, "spring.datasource", "database");
         result.setProperty("redis.host", required(yaml, "spring.data.redis.host", file));
         result.setProperty("redis.port", value(yaml, "spring.data.redis.port", "6379"));
         result.setProperty("redis.password", value(yaml, "spring.data.redis.password", ""));
@@ -54,43 +54,62 @@ final class ApplicationYamlConfig {
         result.setProperty("execution.expected-vector-type", value(yaml, "rag.vector.type", ""));
         result.setProperty("execution.expected-storage-type", value(yaml, "rag.storage.type", ""));
         result.setProperty("execution.engine-type", value(yaml, "ragent.engine.type", ""));
+        result.setProperty("agent.chat.provider", value(yaml, "agent.chat.provider", ""));
+        result.setProperty("agent.chat.model", value(yaml, "agent.chat.model", ""));
 
         // 记忆回归台要在报告里同时给出「服务端在用的阈值」和「本次实测量」，阈值只能来自这一份 yaml
-        // 键名与 yaml 路径逐段对齐，摘要与长期记忆各自成段后 trigger-chars 这类同名项才不会撞在一起
-        result.setProperty("agent.memory.enabled", value(yaml, "agent.memory.enabled", "true"));
-        result.setProperty("agent.memory.tool-result.trigger-chars",
-                value(yaml, "agent.memory.tool-result.trigger-chars", "0"));
-        result.setProperty("agent.memory.tool-result.keep-recent-cycles",
-                value(yaml, "agent.memory.tool-result.keep-recent-cycles", "0"));
-        result.setProperty("agent.memory.tool-result.clear-at-least-ratio",
-                value(yaml, "agent.memory.tool-result.clear-at-least-ratio", "0"));
+        // 四道门已收敛成窗口的固定比例，这里只搬窗口本身；派生用的比例在 AgentMemoryRegressionMain 里另有一份手抄副本
+        result.setProperty("agent.memory.context-window-chars",
+                value(yaml, "agent.memory.context-window-chars", "0"));
+        result.setProperty("agent.memory.summary-enabled",
+                value(yaml, "agent.memory.summary-enabled", "true"));
+        result.setProperty("agent.memory.long-term-enabled",
+                value(yaml, "agent.memory.long-term-enabled", "true"));
         return result;
     }
 
-    private static void applyPostgres(Map<String, String> yaml, Path file, Properties result) {
-        String jdbcUrl = required(yaml, "spring.datasource.url", file);
+    /**
+     * 只取 mcp-server 那份 yml 里的 ragent.bit 一段
+     * <p>
+     * 业务库的表结构归 mcp-server 建，库的身份自然也以它那份配置为准，两边各写一遍迟早对不上。
+     * 这里不复用 load：那份 yml 里没有 spring.datasource 也没有 redis，整份读会先炸在与业务库无关的必填项上
+     */
+    static Properties loadBit(Path file) throws IOException {
+        if (!Files.isRegularFile(file)) {
+            throw new IllegalArgumentException("mcp-server application.yml 不存在: " + file);
+        }
+        Map<String, String> yaml = readScalarValues(file);
+        Properties result = new Properties();
+        applyDatasource(yaml, file, result, "ragent.bit.datasource", "biz-database");
+        return result;
+    }
+
+    private static void applyDatasource(Map<String, String> yaml, Path file, Properties result,
+                                        String yamlPrefix, String targetPrefix) {
+        String urlKey = yamlPrefix + ".url";
+        String jdbcUrl = required(yaml, urlKey, file);
         if (!jdbcUrl.startsWith("jdbc:")) {
-            throw new IllegalArgumentException("spring.datasource.url 不是 JDBC URL: " + jdbcUrl);
+            throw new IllegalArgumentException(urlKey + " 不是 JDBC URL: " + jdbcUrl);
         }
         URI uri;
         try {
             uri = URI.create(jdbcUrl.substring("jdbc:".length()));
         } catch (IllegalArgumentException ex) {
-            throw new IllegalArgumentException("spring.datasource.url 格式错误: " + jdbcUrl, ex);
+            throw new IllegalArgumentException(urlKey + " 格式错误: " + jdbcUrl, ex);
         }
         if (!"postgresql".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null) {
             throw new IllegalArgumentException("初始化器仅支持 PostgreSQL JDBC URL: " + jdbcUrl);
         }
         String database = uri.getPath();
         if (database == null || database.length() <= 1) {
-            throw new IllegalArgumentException("spring.datasource.url 缺少数据库名: " + jdbcUrl);
+            throw new IllegalArgumentException(urlKey + " 缺少数据库名: " + jdbcUrl);
         }
-        result.setProperty("database.jdbc-url", jdbcUrl);
-        result.setProperty("database.host", uri.getHost());
-        result.setProperty("database.port", String.valueOf(uri.getPort() < 0 ? 5432 : uri.getPort()));
-        result.setProperty("database.name", database.substring(1));
-        result.setProperty("database.username", required(yaml, "spring.datasource.username", file));
-        result.setProperty("database.password", value(yaml, "spring.datasource.password", ""));
+        result.setProperty(targetPrefix + ".jdbc-url", jdbcUrl);
+        result.setProperty(targetPrefix + ".host", uri.getHost());
+        result.setProperty(targetPrefix + ".port", String.valueOf(uri.getPort() < 0 ? 5432 : uri.getPort()));
+        result.setProperty(targetPrefix + ".name", database.substring(1));
+        result.setProperty(targetPrefix + ".username", required(yaml, yamlPrefix + ".username", file));
+        result.setProperty(targetPrefix + ".password", value(yaml, yamlPrefix + ".password", ""));
     }
 
     private static String required(Map<String, String> values, String key, Path file) {

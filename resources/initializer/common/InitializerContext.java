@@ -6,9 +6,12 @@
  */
 package com.nageoffer.ai.ragent.initializer;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -30,6 +33,7 @@ final class InitializerContext implements AutoCloseable {
     private final String runId = UUID.randomUUID().toString();
     private final Map<String, KnowledgeBaseRuntime> knowledgeBases = new HashMap<>();
     private RagentHttpClient.LoginSession loginSession;
+    private JdbcClient bizJdbc;
 
     private InitializerContext(Path agentTypeDir, InitializerConfig config, InitializerDataset dataset,
                                boolean dryRun, boolean skipWarmup, String confirmation) {
@@ -40,7 +44,7 @@ final class InitializerContext implements AutoCloseable {
         this.skipWarmup = skipWarmup;
         this.confirmation = confirmation;
         this.http = new RagentHttpClient(config);
-        this.jdbc = new JdbcClient(config);
+        this.jdbc = new JdbcClient(config, "database");
         this.redis = new RedisRespClient(config);
     }
 
@@ -94,6 +98,24 @@ final class InitializerContext implements AutoCloseable {
         return jdbc;
     }
 
+    /**
+     * 业务库客户端，懒建：企业助手那套数据集根本没有业务库，提前建出来会在第一次取配置时就炸
+     */
+    JdbcClient bizJdbc() {
+        if (bizJdbc == null) {
+            if (!hasBizDatabase()) {
+                throw new IllegalStateException("数据集没有配置业务库，请在 initializer.properties 里加上 "
+                        + "application.mcp-config 指向 mcp-server 的 application.yml");
+            }
+            bizJdbc = new JdbcClient(config, "biz-database");
+        }
+        return bizJdbc;
+    }
+
+    boolean hasBizDatabase() {
+        return !config.get("biz-database.jdbc-url", "").isBlank();
+    }
+
     RedisRespClient redis() {
         return redis;
     }
@@ -139,35 +161,43 @@ final class InitializerContext implements AutoCloseable {
         return result;
     }
 
+    /**
+     * 前一个关失败不能让后面的漏关，异常先收着最后一起抛
+     */
     @Override
     public void close() throws IOException {
         IOException failure = null;
-        try {
-            http.close();
-        } catch (RuntimeException ex) {
-            failure = new IOException("退出 Ragent 登录失败", ex);
-        }
-        try {
-            jdbc.close();
-        } catch (IOException ex) {
-            if (failure == null) {
-                failure = ex;
-            } else {
-                failure.addSuppressed(ex);
-            }
-        }
-        try {
-            redis.close();
-        } catch (IOException ex) {
-            if (failure == null) {
-                failure = ex;
-            } else {
-                failure.addSuppressed(ex);
+        for (Closeable target : closeables()) {
+            try {
+                target.close();
+            } catch (IOException ex) {
+                if (failure == null) {
+                    failure = ex;
+                } else {
+                    failure.addSuppressed(ex);
+                }
             }
         }
         if (failure != null) {
             throw failure;
         }
+    }
+
+    private List<Closeable> closeables() {
+        List<Closeable> result = new ArrayList<>();
+        result.add(() -> {
+            try {
+                http.close();
+            } catch (RuntimeException ex) {
+                throw new IOException("退出 Ragent 登录失败", ex);
+            }
+        });
+        result.add(jdbc);
+        if (bizJdbc != null) {
+            result.add(bizJdbc);
+        }
+        result.add(redis);
+        return result;
     }
 
     record KnowledgeBaseRuntime(String id, String collectionName, String name) {
